@@ -246,6 +246,13 @@ export class Controller {
       case 'window-fit':
         this.active?.sendFit(ev.ok === true);
         break;
+      case 'clipboard':
+        if (this.clipAsker && this.clipAsker === this.active) this.clipAsker.sendClip(ev.text, ev.ok === true && typeof ev.text === 'string');
+        this.clipAsker = null;
+        break;
+      case 'clipboard-set':
+        this.active?.sendClipSet(ev.ok === true);
+        break;
       case 'text-focus':
         // A click just put the Mac's focus in a text box (or out of one): a phone can bring up its keyboard.
         this.active?.sendTextFocus(ev.editable === true, ev.secure === true);
@@ -408,6 +415,16 @@ export class Controller {
     this.app.command('windows', {});
   }
 
+  clipGet(session) {
+    if (session !== this.active) return;
+    this.clipAsker = session;
+    this.app.command('clipboard-get', {});
+  }
+
+  clipSet(session, text, paste) {
+    if (session === this.active) this.app.command('clipboard-set', { text, paste: !!paste });
+  }
+
   // The owner's viewer turned its microphone on or off. The app plays it on the output chosen in Setup.
   micChanged(session, on) {
     if (session !== this.active) return;
@@ -507,8 +524,13 @@ export class Controller {
       return;
     }
     if (this.active === session && this.guests.size > 0) {
-      // The owner's viewer left but guests are still watching: keep the picture going for them.
+      // The owner's viewer left but guests are still watching: keep the picture going for them, showing exactly
+      // what the owner was showing (the same display, and only the one window if one was chosen), never more.
       this.active = null;
+      for (const g of this.guests) {
+        g.display = session.display;
+        g.window = session.window ?? null;
+      }
       this.app.command('session', { active: true, viewer: 'A guest (view only)', route: 'guest', curtain: false });
       this._sendCapture(this.leader);
       if (wasReady && reason !== 'signed-in-elsewhere') {
@@ -685,7 +707,7 @@ export class Controller {
   relayIceServers() { return this.relay.iceServers(); }
 
   // Offered to viewers: one-tap sign-in needs the Mac's fixed DTLS certificate.
-  get caps() { return [...(this.store.dtlsKeys ? ['quick'] : []), 'fps60', 'view', 'window', 'mic', 'textfocus']; }
+  get caps() { return [...(this.store.dtlsKeys ? ['quick'] : []), 'fps60', 'view', 'window', 'mic', 'textfocus', 'clipboard']; }
 
   async relaySet(keyId, apiToken) {
     const replacing = this.relay.configured;

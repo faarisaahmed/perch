@@ -170,6 +170,9 @@ input:focus-visible { outline: 3px solid var(--accent); outline-offset: 1px; }
   box-shadow: 0 10px 30px rgba(0, 0, 0, .5); display: flex; flex-direction: column; gap: 8px;
 }
 .menu[hidden] { display: none; }
+/* Longer than a small phone's screen: it scrolls rather than running off the bottom. */
+.menu { max-height: calc(100dvh - env(safe-area-inset-top) - 70px); overflow-y: auto; overscroll-behavior: contain; }
+.menu .btn { text-align: left; }
 .viewer.tb-bottom .menu { top: auto; bottom: calc(env(safe-area-inset-bottom) + 58px); }
 .viewer.tb-left .menu { top: 12px; right: auto; left: 64px; }
 .viewer.tb-right .menu { top: 12px; right: 64px; }
@@ -346,9 +349,22 @@ input:focus-visible { outline: 3px solid var(--accent); outline-offset: 1px; }
   .tb-mac { max-width: 84px; }
   .tb-btn { width: 40px; }
 }
+@media (max-width: 360px) {
+  .tb-mac { max-width: 56px; padding: 0 4px 0 4px; }
+  .tb-btn { width: 36px; }
+}
 
 /* A captured mouse: the page's pointer is gone (the browser hides it); the Mac's own pointer is in the picture. */
 .viewer.captured .surface { cursor: none; }
+
+/* Text to or from the Mac's clipboard */
+.clip-text {
+  width: 100%; min-height: 120px; max-height: 40vh; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--text); font: 16px/1.4 var(--mono); resize: vertical; margin: 8px 0 4px;
+}
+
+/* No numbers yet: no empty box */
+.stats:empty { display: none; }
 /* Or just hidden over the picture, by choice: the Mac's pointer is the only one. */
 .viewer.nocursor .surface { cursor: none; }
 

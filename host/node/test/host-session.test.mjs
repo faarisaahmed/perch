@@ -643,6 +643,22 @@ test('one window: the list, choosing it, reshaping it, and going back to the who
   assert.deepEqual([other.display, 'window' in other], [2, false]);
 });
 
+test('clipboard text both ways, for the signed-in owner only', async (t) => {
+  const ctx = await pairedHost(t);
+  const { app } = ctx;
+  const { v, end } = await passkey(t, ctx);
+  assert.equal(end.t, 'ready');
+  assert.ok(v.firstReply.caps.includes('clipboard'));
+  v.send({ t: 'clip-set', text: 'from the phone \u{1F426}', paste: true });
+  assert.deepEqual(await v.next(['clip-set']), { t: 'clip-set', ok: true });
+  assert.deepEqual([app.clipboard, app.pasted], ['from the phone \u{1F426}', 1]);
+  v.send({ t: 'clip-get' });
+  assert.deepEqual(await v.next(['clip']), { t: 'clip', ok: true, text: 'from the phone \u{1F426}' });
+  v.send({ t: 'clip-set', text: 'x'.repeat(30001) });
+  assert.equal((await v.next(['clip-set'])).ok, false);
+  assert.equal(app.clipboard, 'from the phone \u{1F426}', 'too long: nothing changed');
+});
+
 test('after a click, the viewer hears whether the Mac now waits for typing', async (t) => {
   const ctx = await pairedHost(t);
   const { v, end } = await passkey(t, ctx);
@@ -1016,11 +1032,18 @@ test('guest link: watch only, alongside the owner or alone; ends when stopped or
   await app.waitFor(() => owner.v.media.video > 20 && guest.media.video > v0 + 20, { what: 'picture for both' });
   owner.v.sendInput({ t: 'k', c: 'KeyB', k: 'b', d: true, m: 0 });
   await app.waitFor(() => app.inputs.some(i => i.ev.c === 'KeyB'), { what: 'the owner\'s key' });
+  // The owner shows one window on the second display, then leaves: the guest keeps seeing just that window.
+  owner.v.send({ t: 'display', id: 2 });
+  await app.waitForCommand(c => c.c === 'capture' && c.display === 2);
+  owner.v.send({ t: 'window', id: 7 });
+  await app.waitForCommand(c => c.c === 'capture' && c.window === 7);
+  const beforeBye = app.commands.length;
   owner.v.send({ t: 'bye' });
   await app.waitFor(async () => (await app.call('state')).session === null, { what: 'the owner to leave' });
   const v1 = guest.media.video;
   await app.waitFor(() => guest.media.video > v1 + 20, { what: 'the guest still watching' });
-  assert.equal(app.commands.filter(c => c.c === 'capture').at(-1).on, true);
+  const kept = app.commands.slice(beforeBye).filter(c => c.c === 'capture').at(-1);
+  assert.deepEqual([kept?.on, kept?.display, kept?.window], [true, 2, 7], 'the guest sees no more than the owner was showing');
 
   // Stopping the link disconnects the guest and stops the picture; the link no longer works.
   await app.call('guestStop');

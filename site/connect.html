@@ -3,11 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-<!-- connect-src: the public message services (shared/proto.js BROKERS), Worker relays (wss://*.workers.dev, see
-     shared/wsrelay.js) and, for tests run on this computer, loopback
+<!-- connect-src: the three public message services (shared/proto.js BROKERS) and, for tests run on this computer, loopback
      WebSockets only (the page honours ?brokers= on localhost/127.0.0.1 alone). media-src: the Mac's video arrives as a
      MediaStream. 'wasm-unsafe-eval': the backup password library is WebAssembly. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' wss://broker.emqx.io:8084 wss://broker.hivemq.com:8884 wss://test.mosquitto.org:8081 wss://public.cloud.shiftr.io wss://*.workers.dev ws://127.0.0.1:* ws://localhost:*; media-src 'self' blob: mediastream:; img-src 'self' data: blob:; style-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' wss://broker.emqx.io:8084 wss://broker.hivemq.com:8884 wss://test.mosquitto.org:8081 wss://public.cloud.shiftr.io ws://127.0.0.1:* ws://localhost:*; media-src 'self' blob: mediastream:; img-src 'self' data: blob:; style-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#0d1015">
@@ -216,6 +215,9 @@
   </div>
 
   <div id="moreMenu" class="menu" role="group" aria-label="More options" hidden>
+    <label class="check" id="touchpadWrap" hidden><input type="checkbox" id="optTouchpad"> Touchpad mode</label>
+    <p class="fine" id="touchpadHelp" hidden>Your finger moves the Mac's pointer like a laptop's touchpad; tap to click
+      where the pointer is.</p>
     <label class="tb-select" id="edgeWrap">
       <span>Bar</span>
       <select id="optEdge" title="Which edge the toolbar sits on">
@@ -240,6 +242,8 @@
       <select id="optWindow" title="Show the whole screen or one window"><option value="">The whole screen</option></select>
     </label>
     <button type="button" id="optFit" class="btn small" data-icon="fullscreen" hidden>Fit this window to my screen</button>
+    <button type="button" id="optPaste" class="btn small" data-icon="paste" hidden>Paste text on the Mac</button>
+    <button type="button" id="optCopy" class="btn small" data-icon="copy" hidden>Copy the Mac's clipboard</button>
     <button type="button" id="optMic" class="btn small" data-icon="mic" aria-pressed="false" hidden>Talk through your Mac</button>
     <button type="button" id="optZoom" class="btn small" data-icon="zoom">Zoom back out</button>
     <button type="button" id="optKeyframe" class="btn small" data-icon="refresh">Refresh the picture</button>
@@ -292,6 +296,22 @@
     <span class="kbd-fab-label" id="kbdFabLabel" aria-live="polite"></span>
     <textarea id="softkbd" class="softkbd" aria-label="Type on your Mac" autocapitalize="off" autocomplete="off"
       autocorrect="off" spellcheck="false" enterkeyhint="enter" rows="1"></textarea>
+  </div>
+
+  <!-- Text to or from the Mac's clipboard, when the browser won't read or write this device's clipboard itself. -->
+  <div id="clipSheet" class="ended" role="dialog" aria-modal="true" aria-labelledby="clipTitle" hidden>
+    <div class="ended-card">
+      <h2 id="clipTitle" tabindex="-1">Send text to your Mac</h2>
+      <p id="clipHelp">Paste or type it here.</p>
+      <textarea id="clipText" class="clip-text" rows="5" spellcheck="false" autocapitalize="off"
+        aria-labelledby="clipTitle" aria-describedby="clipHelp"></textarea>
+      <p id="clipStatus" class="msg bad" role="alert" hidden></p>
+      <div class="stack">
+        <button type="button" id="clipGo" class="btn primary big">Paste on the Mac</button>
+        <button type="button" id="clipOnly" class="btn">Only put it on the Mac's clipboard</button>
+        <button type="button" id="clipClose" class="btn quiet">Cancel</button>
+      </div>
+    </div>
   </div>
 
   <div id="ended" class="ended" role="dialog" aria-modal="true" aria-labelledby="endedTitle" hidden>
