@@ -5,12 +5,19 @@ import { toDisplay, zoomAround, panView, isZoomed, IDENTITY } from './coords.js'
 import { wheelPixels, WheelAccumulator } from './wheel.js';
 import { TouchGestures } from './touch.js';
 import { ClickCounter } from './clicks.js';
+import { SwipeDetector } from './shortcuts.js';
+
+// The last 2 page pixels at each side of the picture are the Mac's very edge (see coords.js).
+const EDGE_PX = 2;
 
 export class PointerInput {
   // surface: the element that gets the events (not transformed); video: for the picture size;
   // session: {sendInput, sendPointer}; view: {get(), set(view)} for local zoom; size(): fallback picture size.
-  constructor({ surface, video, session, view, size, enabled = () => true, onActivity = () => {} }) {
-    Object.assign(this, { surface, video, session, view, size, enabled, onActivity });
+  // onSwipe(dir): a swipe sideways (two fingers on a touchpad, three on a touch screen; +1 next, -1 previous) or up
+  // and down with three fingers ('up', 'down'). swipesOn(): whether a touchpad's sideways swipe is one (or scrolls).
+  constructor({ surface, video, session, view, size, enabled = () => true, onActivity = () => {}, onSwipe = () => {}, swipesOn = () => false }) {
+    Object.assign(this, { surface, video, session, view, size, enabled, onActivity, onSwipe, swipesOn });
+    this.swipe = new SwipeDetector();
     this.clicks = new ClickCounter();
     this.wheel = new WheelAccumulator();
     this.gestures = new TouchGestures({ isZoomed: () => isZoomed(this.view.get()) });
@@ -72,7 +79,7 @@ export class PointerInput {
   map(clientX, clientY) {
     const box = this.surface.getBoundingClientRect();
     const [w, h] = this.pictureSize();
-    return toDisplay(clientX, clientY, box, w, h, this.view.get());
+    return toDisplay(clientX, clientY, box, w, h, this.view.get(), EDGE_PX);
   }
 
   pictureSize() {
@@ -143,6 +150,12 @@ export class PointerInput {
     e.preventDefault();
     this.onActivity(e);
     const { dx, dy } = wheelPixels(e, { pageWidth: this.surface.clientWidth, pageHeight: this.surface.clientHeight });
+    // Not a mouse wheel's notches (whole lines or pages) and not Shift+wheel: a touchpad, where sideways is a swipe.
+    if (e.deltaMode === 0 && !e.shiftKey && this.swipesOn()) {
+      const r = this.swipe.wheel(dx, dy, e.timeStamp);
+      if (r.swipe) this.onSwipe(r.swipe);
+      if (!r.pass) return;
+    }
     const p = this.pos(e);
     this.wheel.add(dx, dy, p.x, p.y);
     this._schedule();
@@ -208,6 +221,10 @@ export class PointerInput {
         const v = this.view.get();
         this.view.set(a.a === 'zoom' ? zoomAround(v, a.factor, a.cx, a.cy, box)
           : a.a === 'pan' ? panView(v, a.dx, a.dy, box) : IDENTITY);
+        continue;
+      }
+      if (a.a === 'swipe') {
+        this.onSwipe(a.dir);
         continue;
       }
       if (a.a === 'scroll') {
