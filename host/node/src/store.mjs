@@ -29,8 +29,14 @@ export const DEFAULT_SETTINGS = Object.freeze({
   curtain: false,            // black out the Mac's own screen while a viewer is connected
   micOutput: '',             // where a viewer's microphone is played: '' = the Mac's current output, or a device UID
   quality: DEFAULT_QUALITY,
-  sharedRelay: true,         // use Perch's shared relay service when it exists and no relay key of your own is set
+  // The 6-digit authenticator code, asked for after each of these (the owner can switch any of them off in Setup).
+  codeWithPasskey: true,
+  codeWithBackup: true,
+  codeWithPairing: true,
 });
+
+// Which code setting covers each route.
+export const CODE_SETTING = Object.freeze({ passkey: 'codeWithPasskey', backup: 'codeWithBackup', pair: 'codeWithPairing' });
 
 export function defaultHome() {
   return join(homedir(), 'Library', 'Application Support', 'Perch');
@@ -186,6 +192,11 @@ export class Store {
     return this.config.settings;
   }
 
+  // Is the 6-digit code asked for on this route? (Guests never get one: the link is their pass.)
+  codeNeeded(route) { return route in CODE_SETTING ? this.settings[CODE_SETTING[route]] !== false : false; }
+  // Is the authenticator app needed at all? Not when every code is switched off.
+  get authenticatorNeeded() { return Object.values(CODE_SETTING).some(k => this.settings[k] !== false); }
+
   // --- authenticator app ---
   get totpSecret() { return this.secrets.totpSecret ? Buffer.from(fromB64url(this.secrets.totpSecret)) : null; }
   async setTotpSecret(bytes) {
@@ -214,21 +225,6 @@ export class Store {
     this.secrets.relay = login ? { keyId: login.keyId, apiToken: login.apiToken } : null;
     await this.saveSecrets();
     this.config.relay = { set: !!login, setAt: login ? new Date().toISOString() : null };
-    this.save();
-  }
-
-  // --- the shared relay service: this Mac's relay key (Ed25519, made once, proves which Mac is asking) and, on the
-  // service owner's own Macs, the owner key that lifts the per-Mac limit ---
-  get relayIdentity() { return this.secrets.relayId ?? null; }
-  async setRelayIdentity(id) {
-    this.secrets.relayId = id ? { pkcs8: id.pkcs8, pub: id.pub } : null;
-    await this.saveSecrets();
-  }
-  get relayOwnerKey() { return this.secrets.relayOwner ?? null; }
-  async setRelayOwnerKey(key) {
-    this.secrets.relayOwner = key || null;
-    await this.saveSecrets();
-    this.config.relayOwner = { set: !!key, setAt: key ? new Date().toISOString() : null };
     this.save();
   }
 

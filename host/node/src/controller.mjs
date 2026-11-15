@@ -61,7 +61,7 @@ export class Controller {
     authTimeoutMs = AUTH_TIMEOUT_MS, relay = null }) {
     Object.assign(this, { config, store, auth, rendezvous, app, log, updater, now, authTimeoutMs });
     this.signaling = new Signaling({ rendezvous, hub: this, log: log.child('rendezvous'), now });
-    this.relay = relay ?? new Relay({ store, log: log.child('relay'), now, serviceUrl: config.relayServiceUrl });
+    this.relay = relay ?? new Relay({ store, log: log.child('relay'), now });
     this.workerRelay = new WorkerRelay({ store, log: log.child('worker-relay'), now, allowLocal: !!config?.test,
       ...(config?.relayFetch ? { fetchImpl: config.relayFetch } : {}) });
     this.sessions = new Set();
@@ -129,7 +129,7 @@ export class Controller {
     if (this.active) return 'connected';
     if (this.store.settings.paused) return 'paused';
     if (this.rendezvous.connectedCount === 0) return 'offline';
-    if (!this.store.config.totp.set || this.store.devices.length === 0) return 'needs-setup';
+    if ((this.store.authenticatorNeeded && !this.store.config.totp.set) || this.store.devices.length === 0) return 'needs-setup';
     return 'ready';
   }
 
@@ -140,7 +140,7 @@ export class Controller {
       case 'connected': return `${this.active.label} is connected`;
       case 'paused': return 'Paused: nobody can connect';
       case 'offline': return 'Offline: can’t reach the internet. Retrying…';
-      case 'needs-setup': return !this.store.config.totp.set ? 'Finish setting up: add Perch to your authenticator app'
+      case 'needs-setup': return this.store.authenticatorNeeded && !this.store.config.totp.set ? 'Finish setting up: add Perch to your authenticator app'
         : 'Finish setting up: pair a phone or computer';
       default: return 'Ready: open just-rice.github.io/perch to connect';
     }
@@ -366,7 +366,7 @@ export class Controller {
       if (!this.auth.guestInfo()) return { reason: 'link-expired' };
       return this.guests.size >= MAX_GUESTS ? { reason: 'busy', retryAfter: 30 } : null;
     }
-    if (!s.config.totp.set) return { reason: 'not-set-up' };
+    if (s.authenticatorNeeded && !s.config.totp.set) return { reason: 'not-set-up' };
     if (hello.route === 'passkey' && s.devices.length === 0) return { reason: 'not-set-up' };
     if (hello.route === 'backup' && (!s.settings.backupOn || !s.config.backup.record)) return { reason: 'backup-off' };
     const locked = this.auth.lockedFor(hello.route);
@@ -733,24 +733,9 @@ export class Controller {
     return { ok: true };
   }
 
-  async relayOwnerSet(key) {
-    await this.relay.saveOwnerKey(key);
-    this.store.activity('settings', 'This Mac is now one of the shared relay owner\u2019s Macs');
-    this._changed();
-    return { ok: true };
-  }
-
-  async relayOwnerRemove() {
-    if (this.store.relayOwnerKey) this.store.activity('settings', 'Shared relay owner key removed');
-    await this.relay.removeOwnerKey();
-    this.relay.warm();
-    this._changed();
-  }
-
   async relayRemove() {
     if (this.relay.configured) this.store.activity('settings', 'Relay for strict networks removed');
     await this.relay.remove();
-    this.relay.warm(); // the shared relay, if there is one, takes over
     this._changed();
   }
 
@@ -783,6 +768,13 @@ export class Controller {
     const previous = this.workerRelay.base;
     await this.workerRelay.save(url);
     this._useRelayBroker(previous !== this.workerRelay.base ? previous : null);
+    // The relay serves the Perch site too: devices can sign in there (and new pairing links point there), on this
+    // Mac only. Nobody else's Mac uses it.
+    const base = this.workerRelay.base;
+    if (base && !this.auth.siteFor(base)) {
+      this.store.addSite({ origin: base, url: `${base}/connect` });
+      this.store.activity('settings', `Sign-ins are now accepted from ${base} (this Mac's relay)`);
+    }
     this.store.activity('settings', replacing ? 'Worker relay replaced' : 'Worker relay for strict networks set up');
     this._changed();
     return { ok: true };
@@ -809,8 +801,11 @@ export class Controller {
     const s = this.store;
     for (const [k, v] of Object.entries(patch)) {
       switch (k) {
+        case 'codeWithPasskey': case 'codeWithBackup': case 'codeWithPairing':
+          if (typeof v !== 'boolean') throw new Error(`${k} must be true or false.`);
+          if (v && !s.config.totp.set) throw new Error('Set up the authenticator app first (step 2), then switch this on.');
+          break;
         case 'loginItem': case 'keepAwake': case 'backupOn': case 'paused': case 'lockOnDisconnect': case 'curtain':
-        case 'sharedRelay':
           if (typeof v !== 'boolean') throw new Error(`${k} must be true or false.`);
           break;
         case 'idleMinutes':
@@ -844,16 +839,17 @@ export class Controller {
       await this._applyListening();
     }
     if ('keepAwake' in patch) this.app.command('keep-awake', { on: after.keepAwake });
+    for (const [k, what] of [['codeWithPasskey', 'after a passkey'], ['codeWithBackup', 'with the backup password'],
+      ['codeWithPairing', 'when pairing a device']]) {
+      if (k in patch && after[k] !== before[k]) {
+        s.activity('settings', `${after[k] ? 'The 6-digit code is asked for' : 'No 6-digit code'} ${what}`);
+      }
+    }
     // The curtain can go up or down in the middle of a session.
     if ('curtain' in patch && this.active) {
       this.app.command('session', { active: true, viewer: this.active.label, route: this.active.route, curtain: after.curtain });
     }
     if ('loginItem' in patch) this.app.command('login-item', { on: after.loginItem });
-    if ('sharedRelay' in patch && after.sharedRelay !== before.sharedRelay) {
-      this.relay.forget();
-      this.relay.warm();
-      this.store.activity('settings', after.sharedRelay ? 'Shared relay turned on' : 'Shared relay turned off');
-    }
     this._changed();
     return { ...after };
   }

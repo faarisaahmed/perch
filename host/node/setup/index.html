@@ -123,6 +123,8 @@
         <h2 id="hTotp">Add Perch to your authenticator app</h2>
         <p class="lead">Each time you connect, Perch asks for a 6-digit code from this app as well as your passkey, so a
           lost phone or a guessed password is never enough on its own.</p>
+        <p class="small muted" id="totpOptional" hidden>Optional now: no 6-digit code is asked for anywhere (Settings,
+          Sign-in). Set it up if you want codes back.</p>
       </div>
     </div>
 
@@ -312,35 +314,9 @@
     <h2 id="hRelay">School or office Wi-Fi <span class="optional">optional</span></h2>
     <p class="lead">Some networks block the direct connection Perch normally uses. A relay passes the connection through
       Cloudflare instead, over the same route as ordinary websites.</p>
-    <div id="sharedRelay" hidden>
-      <div class="switch-row">
-        <label class="switch">
-          <span class="switch-text"><span>Use Perch's shared relay</span>
-            <span class="muted">Free, nothing to set up. Each Mac can relay up to its share (about 20 GB, many hours
-              of use) in any 31 days.</span></span>
-          <input type="checkbox" role="switch" id="setSharedRelay">
-        </label>
-      </div>
-      <p class="small" id="sharedRelayStatus"></p>
-      <details id="relayOwner">
-        <summary>I run this relay service</summary>
-        <p class="small muted">Type the service's owner key on each of your own Macs. They then have no 20 GB limit, only
-          the service's overall one, and this card shows everyone's use.</p>
-        <form id="relayOwnerForm" novalidate>
-          <label for="relayOwnerKey">Owner key</label>
-          <input id="relayOwnerKey" type="password" autocomplete="off" spellcheck="false" autocapitalize="off">
-          <div class="actions">
-            <button type="submit" class="btn primary" id="relayOwnerSaveBtn">Check and save</button>
-            <button type="button" class="btn danger-quiet" id="relayOwnerRemoveBtn" hidden>Remove the owner key</button>
-          </div>
-        </form>
-        <p class="msg ok" id="relayOwnerOk" role="status" hidden></p>
-        <p class="msg bad" id="relayOwnerError" role="alert" hidden></p>
-      </details>
-      <h3 class="own-relay-head">Or a relay of your own</h3>
-    </div>
     <p class="small muted" id="ownRelayLead">Set it up once, in your own Cloudflare account: free for the first 1,000 GB each
-      month, which is hundreds of hours of use. It is used instead of the shared relay.</p>
+      month, which is hundreds of hours of use. Cloudflare may ask for a payment card for this one; the relay below
+      ("Relay without a card") doesn't.</p>
     <p class="small"><b>Status:</b> <span id="relayStatus">Not set up</span></p>
     <details id="relayHow">
       <summary>How to get a relay key (about 5 minutes)</summary>
@@ -472,6 +448,32 @@ npx wrangler deploy</pre></li>
         <span class="switch-text"><b>Pause Perch</b>
           <span class="muted">Nobody can connect while Perch is paused.</span></span>
         <input type="checkbox" role="switch" id="setPaused" data-setting="paused">
+      </label>
+    </div>
+    <h3 class="settings-head">Sign-in</h3>
+    <p class="small muted">Each switch adds the 6-digit code from your authenticator app to that way in. Switching one off
+      makes it quicker, and less safe: whoever has the passkey (or knows the backup password, or holds a pairing link)
+      gets in with nothing else. Wrong tries still lock sign-in for a while.</p>
+    <div class="switch-row">
+      <label class="switch" for="setCodePasskey">
+        <span class="switch-text"><b>Ask for the code after a passkey</b>
+          <span class="muted">Off: a passkey alone signs in (Face ID or Touch ID on your device).</span></span>
+        <input type="checkbox" role="switch" id="setCodePasskey" data-setting="codeWithPasskey">
+      </label>
+    </div>
+    <div class="switch-row">
+      <label class="switch" for="setCodeBackup">
+        <span class="switch-text"><b>Ask for the code with the backup password</b>
+          <span class="muted">Off: the Mac's name and the backup password are enough. Not recommended: a password can
+            be watched or guessed.</span></span>
+        <input type="checkbox" role="switch" id="setCodeBackup" data-setting="codeWithBackup">
+      </label>
+    </div>
+    <div class="switch-row">
+      <label class="switch" for="setCodePairing">
+        <span class="switch-text"><b>Ask for the code when pairing a device</b>
+          <span class="muted">Off: a pairing link alone pairs a device (it still works once, for 10 minutes).</span></span>
+        <input type="checkbox" role="switch" id="setCodePairing" data-setting="codeWithPairing">
       </label>
     </div>
     <div class="field-row">
