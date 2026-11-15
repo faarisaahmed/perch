@@ -791,9 +791,11 @@ async function fpsChangeChecks() {
 
 // The Mac's special keys: pressed and let go as system-defined events; anything not on the list is ignored.
 async function systemKeyChecks() {
-  const out = await echo({ t: 'sys', k: 'volumeUp' });
-  check('special keys: volume up is pressed and let go', deepEqual(out, [{ type: 'systemKey', key: 'volumeUp', down: true },
-    { type: 'systemKey', key: 'volumeUp', down: false }]), JSON.stringify(out));
+  const out = await echo({ t: 'sys', k: 'brightnessUp' });
+  check('special keys: brightness up is pressed and let go', deepEqual(out, [{ type: 'systemKey', key: 'brightnessUp', down: true },
+    { type: 'systemKey', key: 'brightnessUp', down: false }]), JSON.stringify(out));
+  for (const k of ['volumeUp', 'volumeDown', 'mute', 'playPause', 'next', 'previous'])
+    check(`special keys: ${k} does nothing (the Mac stays quiet)`, (await echo({ t: 'sys', k })).length === 0);
   check('special keys: an unknown one does nothing', (await echo({ t: 'sys', k: 'power' })).length === 0);
 }
 

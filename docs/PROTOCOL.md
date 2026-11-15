@@ -357,7 +357,7 @@ having arrived:
 
 | Message | Meaning |
 |---|---|
-| `{t:"sys", k}` (input) | one of the Mac's special keys, pressed and let go: `volumeUp`, `volumeDown`, `mute`, `brightnessUp`, `brightnessDown`, `playPause`, `next`, `previous`, `keyboardLightUp`, `keyboardLightDown`. The app posts them as system-defined events (NX key types), as a Mac keyboard does |
+| `{t:"sys", k}` (input) | one of the Mac's special keys, pressed and let go: `brightnessUp`, `brightnessDown`, `keyboardLightUp`, `keyboardLightDown` (no volume, mute or media keys: a viewer never makes the Mac itself play sound). The app posts them as system-defined events (NX key types), as a Mac keyboard does |
 | `{t:"m", x, y, dx?, dy?}` | pointer moved; with the viewer's mouse captured (pointer lock), `dx`/`dy` say how far it moved in fractions of the picture (−1..1), passed on as the event's movement even where the position is pinned at the screen's edge. Every move carries its movement in the Quartz event (`mouseEventDeltaX/Y`), which games and 3D apps read |
 | `{t:"b", b, d, x, y, n}` | button `b` (0 left, 1 middle, 2 right) down (`d:true`) or up, `n` = click count |
 | `{t:"w", dx, dy, x, y}` | scroll, DOM `WheelEvent` deltas in CSS pixels (positive `dy` = page moves up) |

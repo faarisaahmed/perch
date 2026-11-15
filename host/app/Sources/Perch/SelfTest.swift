@@ -349,13 +349,15 @@ enum SelfTest {
         let pinned = mp.plan(["t": "m", "x": 1.0, "y": 0.45, "dx": 0.05, "dy": 0])
         let ev = InputPoster().events(for: rel[0])
         // The Mac's special keys: a press and a release, as system-defined events (type 14) with the key in data1.
-        let vol = mp.plan(["t": "sys", "k": "volumeUp"])
+        let vol = mp.plan(["t": "sys", "k": "brightnessUp"])
         let volEvents = vol.flatMap { InputPoster().events(for: $0) }
-        check("special keys: volume up is pressed and let go as system-defined events",
-              vol.map(\.json).map { "\($0["key"] ?? "")\($0["down"] as? Bool == true ? "↓" : "↑")" } == ["volumeUp↓", "volumeUp↑"]
+        check("special keys: brightness up is pressed and let go as system-defined events",
+              vol.map(\.json).map { "\($0["key"] ?? "")\($0["down"] as? Bool == true ? "↓" : "↑")" } == ["brightnessUp↓", "brightnessUp↑"]
               && volEvents.count == 2 && volEvents.allSatisfy { $0.type.rawValue == 14 }
-              && NSEvent(cgEvent: volEvents[0])?.data1 == (0 << 16) | (0xA << 8)
+              && NSEvent(cgEvent: volEvents[0])?.data1 == (2 << 16) | (0xA << 8)
               && mp.plan(["t": "sys", "k": "selfDestruct"]).isEmpty)
+        check("special keys: nothing that makes sound (volume, mute, media)",
+              ["volumeUp", "volumeDown", "mute", "playPause", "next", "previous"].allSatisfy { mp.plan(["t": "sys", "k": $0]).isEmpty })
         check("moves carry their distance (games read that, not the position)",
               rel.first?.delta == CGVector(dx: 100, dy: -40) && pinned.first?.delta == CGVector(dx: 50, dy: 0)
               && pinned.first?.explicitDelta == true

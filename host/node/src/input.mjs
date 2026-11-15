@@ -11,8 +11,8 @@ const coord = v => (isNum(v) ? clamp(v, 0, 1) : null);
 
 export const MAX_TEXT_CHARS = 256;
 // The Mac's special keys a viewer can press: sound, screen and keyboard brightness, media.
-export const SYSTEM_KEYS = new Set(['volumeUp', 'volumeDown', 'mute', 'brightnessUp', 'brightnessDown', 'playPause', 'next',
-  'previous', 'keyboardLightUp', 'keyboardLightDown']);
+// Only silent ones: no volume, mute or media keys, so a viewer can never make the Mac itself play sound.
+export const SYSTEM_KEYS = new Set(['brightnessUp', 'brightnessDown', 'keyboardLightUp', 'keyboardLightDown']);
 export const MAX_SCROLL = 10000;          // CSS pixels in one wheel event
 const CODE_RE = /^[A-Za-z0-9]{1,32}$/;    // DOM KeyboardEvent.code, e.g. "KeyA", "ArrowLeft", "Digit1"
 // Control characters other than tab and newline (and DEL) have no business in typed text.

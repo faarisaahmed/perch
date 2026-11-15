@@ -794,18 +794,20 @@ test('desktop: the toolbar on any edge, chosen keys, swipes, a hidden pointer an
     'F5↓0', 'F5↑0', 'MetaLeft↓8', 'KeyK↓8', 'KeyK↑8', 'MetaLeft↑0']);
   await page.shot('viewer-keysbar-chosen');
 
-  // The Mac's own controls: volume and play/pause go as special keys, not shortcuts.
+  // The Mac's own controls: brightness and the keyboard light go as special keys, not shortcuts (no sound keys).
   await page.click('#keysEdit');
   assert.ok(await page.eval(`[...document.querySelectorAll('#keysGroups h3, #keysGroups legend, #keysGroups .ke-group')].some(e => /Mac controls/.test(e.textContent))`),
     'a "Mac controls" group in the chooser');
   await page.eval(`(() => { for (const l of document.querySelectorAll('#keysGroups .ke-item')) {
-    const b = l.querySelector('b').textContent; if (b === 'Vol +' || b === '⏯') l.querySelector('input').click(); } })()`);
+    const b = l.querySelector('b').textContent; if (b === 'Bright +' || b === 'Keys light +') l.querySelector('input').click(); } })()`);
   await page.click('#keysEditorDone');
   n = await count(page);
-  await page.click('#keysBar [data-key="volumeUp"]');
-  await page.click('#keysBar [data-key="playPause"]');
+  await page.click('#keysBar [data-key="brightnessUp"]');
+  await page.click('#keysBar [data-key="keyboardLightUp"]');
   await page.waitFor(`window.__perch.demoMessages.slice(${n}).filter(m => m.t === 'sys').length >= 2`, { what: 'special keys' });
-  assert.deepEqual((await messages(page, n)).filter(m => m.t === 'sys' || m.t === 'k').map(m => m.t === 'sys' ? m.k : m.c), ['volumeUp', 'playPause']);
+  assert.deepEqual((await messages(page, n)).filter(m => m.t === 'sys' || m.t === 'k').map(m => m.t === 'sys' ? m.k : m.c), ['brightnessUp', 'keyboardLightUp']);
+  assert.ok(!(await page.eval(`[...document.querySelectorAll('#keysGroups .ke-item b')].some(b => /Vol|Mute|⏯|⏭|⏮/.test(b.textContent))`)),
+    'no volume, mute or media keys to choose');
 
   // A two-finger swipe sideways on a touchpad: ⌘ held, Tab pressed (the app switcher), ⌘ let go a moment later.
   n = await count(page);

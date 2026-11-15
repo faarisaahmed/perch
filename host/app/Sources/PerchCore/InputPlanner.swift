@@ -68,10 +68,10 @@ public struct PlannedEvent: Equatable {
         self.kind = kind; self.point = point; self.clickState = clickState; self.flags = flags
     }
 
-    /// The Mac's special keys by name (IOKit's NX_KEYTYPE_* numbers).
+    /// The Mac's special keys by name (IOKit's NX_KEYTYPE_* numbers). Only the silent ones: nothing a viewer
+    /// presses can change the Mac's volume, unmute it or start something playing.
     public static let systemKeys: [String: Int32] = [
-        "volumeUp": 0, "volumeDown": 1, "brightnessUp": 2, "brightnessDown": 3, "mute": 7,
-        "playPause": 16, "next": 17, "previous": 18, "keyboardLightUp": 21, "keyboardLightDown": 22,
+        "brightnessUp": 2, "brightnessDown": 3, "keyboardLightUp": 21, "keyboardLightDown": 22,
     ]
     static func systemKeyName(_ k: Int32) -> String? { systemKeys.first(where: { $0.value == k })?.key }
 
