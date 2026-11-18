@@ -907,6 +907,8 @@ test('picture shape: whole, fill (slides after the pointer) and stretch, on a 4:
   await sleep(200);
   assert.ok(await phone.eval('window.__perch.viewer.pan.x') < before, 'dragged right: the left part comes into view');
   assert.deepEqual((await messages(phone, n)).filter(m => m.t === 'w' || m.t === 'b'), [], 'no scrolling or clicks on the Mac');
+});
+
 // A bar at the bottom that hides itself: it comes back only when the mouse touches the very edge, with no tab in the
 // way of clicks, and with the keys bar showing it sits on top of the keys bar rather than over it.
 test('the bar at the bottom, hiding itself: back at the very edge only, and above the keys bar', async () => {
