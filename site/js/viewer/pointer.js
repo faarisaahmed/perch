@@ -10,6 +10,9 @@ import { SwipeDetector } from './shortcuts.js';
 // The last 2 page pixels at each side of the picture are the Mac's very edge (see coords.js).
 const EDGE_PX = 2;
 
+// A captured mouse's speed, chosen in More: from a fifth as fast to twice as fast as the page's own pointer.
+export const MIN_SPEED = 0.2, MAX_SPEED = 2;
+
 // Touchpad mode: the Mac's pointer moves this many times as far as the finger, across the picture.
 const TOUCHPAD_SPEED = 1.6;
 
@@ -22,8 +25,9 @@ export class PointerInput {
   // and down with three fingers ('up', 'down'). swipesOn(): whether a touchpad's sideways swipe is one (or scrolls).
   // layout: {get(), pan(p)}: the picture's shape and where a "fill" picture has slid to (coords.js), and sliding it.
   constructor({ surface, video, session, view, size, enabled = () => true, onActivity = () => {}, touchpad = () => false,
-    onSwipe = () => {}, swipesOn = () => false, layout = { get: () => FIT, pan: () => {} } }) {
-    Object.assign(this, { surface, video, session, view, size, enabled, onActivity, touchpad, onSwipe, swipesOn, layout });
+    onSwipe = () => {}, swipesOn = () => false, layout = { get: () => FIT, pan: () => {} }, mouseSpeed = () => 1 }) {
+    // mouseSpeed(): how far a captured mouse moves the Mac's pointer, 1 = as far as on this screen.
+    Object.assign(this, { surface, video, session, view, size, enabled, onActivity, touchpad, onSwipe, swipesOn, layout, mouseSpeed });
     this.swipe = new SwipeDetector();
     this.clicks = new ClickCounter();
     this.wheel = new WheelAccumulator();
@@ -137,7 +141,8 @@ export class PointerInput {
     if (this.locked) {
       const [sw, sh] = this.shownSize();
       if (!(sw > 0 && sh > 0) || (!e.movementX && !e.movementY)) return;
-      const dx = e.movementX / sw, dy = e.movementY / sh;
+      const k = Math.min(MAX_SPEED, Math.max(MIN_SPEED, Number(this.mouseSpeed()) || 1));
+      const dx = e.movementX * k / sw, dy = e.movementY * k / sh;
       const clamp = v => Math.min(1, Math.max(0, v));
       this.last = { x: clamp(this.last.x + dx), y: clamp(this.last.y + dy) };
       this._followLast();
