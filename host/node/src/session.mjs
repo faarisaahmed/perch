@@ -12,6 +12,7 @@ import { AuthError } from './auth.mjs';
 import { MediaSender, ResolutionGovernor, FpsGovernor, ladderAtLeast } from './media.mjs';
 import { readAnswer, sessionKeys } from '../../../site/js/shared/wsrelay.js';
 import { validateInput, RateLimiter, POINTER_RATE, INPUT_RATE, CONTROL_RATE } from './input.mjs';
+import { ROUTE_WORDS } from '../../../site/js/shared/route.js';
 
 const ANSWER_TIMEOUT_MS = 15000; // offer sent, no answer yet
 
@@ -101,9 +102,20 @@ export class Session {
     peer.onMicRtp = rtp => this._onMic(rtp);
     const unwatch = peer.onConnectionState(s => {
       if (s === 'failed' || s === 'closed') this.end('disconnected', { sendBye: false });
+      // A connection that stalls and comes back: logged, so drops can be told apart from a slow picture.
+      else if (s === 'disconnected' && this.signedInAt) {
+        this.interruptedAt = this.now();
+        this.log?.info('connection interrupted; waiting for it to come back');
+      } else if (s === 'connected' && this.interruptedAt) {
+        this.log?.info(`connection back after ${((this.now() - this.interruptedAt) / 1000).toFixed(1)} s`);
+        this.interruptedAt = null;
+      }
     });
     subs.push({ unSubscribe: unwatch });
   }
+
+  // Which way this session's connection runs (shared/route.js), or null while it isn't known yet.
+  get path() { return this.peer?.route?.()?.kind ?? null; }
 
   _detach() {
     for (const s of this.peerSubs) s.unSubscribe?.();
@@ -165,7 +177,8 @@ export class Session {
     this.bind = await bindingHash(new Uint8Array(nonce), this.peer.offerSdp, this.peer.answerSdp);
     if (this.state !== 'connecting') return;
     this.state = 'auth';
-    this.step = FIRST_STEP[this.route];
+    // A backup sign-in started at the meeting point only has its proof left to give.
+    this.step = this.serverLoginState && this.route === 'backup' ? 'opaque3' : FIRST_STEP[this.route];
     this._send({ t: 'hi', pv: PROTO, hv: this.hub.hv, nonce: toB64url(nonce), name: this.store.macName, route: this.route });
   }
 
@@ -246,6 +259,29 @@ export class Session {
     if (!r || r.length !== 16 || !Number.isSafeInteger(q.ts)) throw new AuthError('bad-proof', 'one-tap sign-in: malformed');
     this.auth.useQuickNonce(q.r, q.ts); // throws if stale or seen before
     return quickChallenge(r, q.ts, fingerprint);
+  }
+
+  // Backup sign-in started at the meeting point (signaling.mjs): the password's first message came with the hello.
+  // Counted against the lockout exactly as _opaque1 counts it. Answers {res} for the offer, or {refuse, retryAfter?}.
+  earlyBackup(req) {
+    if (this.route !== 'backup' || this.serverLoginState) return { refuse: 'protocol' };
+    const attempt = this.auth.attempt('backup');
+    const start = this.auth.opaqueLoginStart(req);
+    if (!start) {
+      this.auth.note('failure', `Backup sign-in refused: malformed request (${this.label})`);
+      return attempt.lockedMs ? { refuse: 'locked-out', retryAfter: seconds(attempt.lockedMs) } : { refuse: 'wrong-password' };
+    }
+    this.backupAttempt = attempt;
+    this.serverLoginState = start.serverLoginState;
+    return { res: start.loginResponse };
+  }
+
+  // The viewer gave up before connecting (signaling.mjs, cancel): after a wrong password, a failed try for the log.
+  cancelled(reason) {
+    if (this.state !== 'offered') return;
+    if (reason === 'wrong-password' && this.serverLoginState) this.auth.note('failure', `Wrong backup password (${this.label})`);
+    this.serverLoginState = null;
+    this.end('denied', { sendBye: false });
   }
 
   async _opaque1(msg) {
@@ -392,6 +428,8 @@ export class Session {
     const who = this.deviceLabel && this.deviceLabel !== this.label ? `${this.label} (${this.deviceLabel})` : this.label;
     this.store.activity(this.guest ? 'guest' : 'sign-in', this.guest ? `A guest started watching: ${this.label}` : `Signed in with ${how}: ${who}`);
     this.log?.info(`signed in (${this.route})`);
+    const path = this.peer.route?.();
+    if (path) this.log?.info(`route: ${ROUTE_WORDS[path.kind].toLowerCase()} (${path.local} ↔ ${path.remote})`);
     // Which H.264 profile this viewer agreed to, known before the Mac is asked for a picture (the Worker relay has no
     // such agreement: Baseline there).
     this.videoProfile = this.peer.videoProfile === 'high' ? 'high' : 'baseline';
@@ -415,10 +453,10 @@ export class Session {
     this._timer(() => {
       this.lastSample = this.media.sample();
       // A link that can't carry this picture size at full frame rate gets a smaller picture (and the size comes back
-      // when the link does).
+      // when the link does), except in a preset that holds its size (Sharp): there it gets fewer frames instead.
       if (!this.guest) {
         const target = this.media.bitrate.target;
-        const sized = this.governor.update(target, this.wantedEdge()) !== undefined;
+        const sized = !this._preset().holdSize && this.governor.update(target, this.wantedEdge()) !== undefined;
         const timed = this.fpsGovernor.update(target, this.governor.need(this.captureEdge())) !== undefined;
         if (sized || timed) this.hub.captureChanged(this);
       }
@@ -439,15 +477,26 @@ export class Session {
     return this.fpsGovernor.fps;
   }
 
-  // What to capture at right now: wantedEdge, less if the link can't carry it.
+  // What to capture at right now: wantedEdge, less if the link can't carry it (unless the preset holds its size).
   captureEdge() {
+    if (this._preset().holdSize) return this.wantedEdge();
     return Math.min(this.wantedEdge(), this.governor.cap ?? Infinity);
   }
 
+  // The coarsest the encoder may go (H.264 quantiser), or undefined for no limit beyond its own.
+  captureMaxQp() {
+    return this._preset().maxQp;
+  }
+
+  _preset() { return QUALITY[this.quality] ?? QUALITY.balanced; }
+
   _presetRates() {
-    const p = QUALITY[this.quality] ?? QUALITY.balanced;
+    const p = this._preset();
     this.governor.setFps(p.fps);
-    this.fpsGovernor.set(p.fps, p.maxFps ?? p.fps);
+    // Over the relay Worker every frame goes through one TCP connection by way of Cloudflare: stepping up to 60 frames
+    // a second there only fills it faster (it did, just before a frozen picture). A preset that asks for 60 outright
+    // (Fast) still gets it.
+    this.fpsGovernor.set(p.fps, this.transport === 'relay' ? p.fps : (p.maxFps ?? p.fps));
   }
 
   _watchIdle() {
@@ -479,6 +528,13 @@ export class Session {
         this.governor.reset();
         this._presetRates();
         this.hub.captureChanged(this);
+        return;
+      case 'levels':
+        // The owner's sound sliders: the Mac's speakers (0–1) and what is sent here (0–1.5).
+        this.hub.setLevels?.(this, {
+          speakers: Number.isFinite(msg.speakers) ? Math.min(1, Math.max(0, msg.speakers)) : undefined,
+          stream: Number.isFinite(msg.stream) ? Math.min(1.5, Math.max(0, msg.stream)) : undefined,
+        });
         return;
       case 'view': {
         // How big the picture is on the viewer's screen: no point sending more pixels than that.

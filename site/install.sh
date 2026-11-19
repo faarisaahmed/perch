@@ -68,8 +68,11 @@ asset_url() {
     grep -E "^${URL_RE}//[^ ]*/$1\$" | head -n 1; } || true
 }
 TAG="$( { printf '%s' "$RELEASE_JSON" | grep -o '"tag_name": *"[^"]*"' | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/'; } || true)"
-ZIP_URL="$(asset_url "Perch-[0-9][0-9.]*${SUFFIX}\\.zip")"
-SUM_URL="$(asset_url "Perch-[0-9][0-9.]*${SUFFIX}\\.zip\\.sha256")"
+# x.y.z, or x.y.z-alpha.N (beta, rc) for a test build asked for by PERCH_VERSION. Spelled out so the Intel file
+# (Perch-x.y.z-intel.zip) can never pass for a test build of the other chip's.
+VER_RE='[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?'
+ZIP_URL="$(asset_url "Perch-${VER_RE}${SUFFIX}\\.zip")"
+SUM_URL="$(asset_url "Perch-${VER_RE}${SUFFIX}\\.zip\\.sha256")"
 if [ -n "$TAG" ] && [ -z "$ZIP_URL" ] && [ -n "$SUFFIX" ]; then
   fail "Perch ${TAG#v} has no version for Intel Macs. Intel support starts with Perch 0.3."
 fi
@@ -108,12 +111,26 @@ fi
 mkdir -p "$DEST_DIR"
 DEST="$DEST_DIR/Perch.app"
 
-if pgrep -x Perch >/dev/null 2>&1; then
+# -a matters: pgrep and pkill leave out their own ancestors unless asked, and Perch's "Update" runs this script from
+# inside Perch, so without it Perch was never found, never quit, and kept running on files deleted from under it (no
+# picture until it was restarted by hand).
+perch_running() { pgrep -a -x Perch >/dev/null 2>&1; }
+wait_for_exit() { # seconds
+  local i=0
+  while perch_running && [ "$i" -lt "$(($1 * 4))" ]; do sleep 0.25; i=$((i + 1)); done
+  ! perch_running
+}
+if perch_running; then
   say "Closing the running Perch…"
-  osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
-  for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -x Perch >/dev/null 2>&1 || break; sleep 0.5; done
-  pkill -x Perch >/dev/null 2>&1 || true
-  sleep 0.5
+  # In the background: if macOS stops to ask whether this may control Perch, the steps below carry on regardless.
+  osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 &
+  if ! wait_for_exit 8; then
+    pkill -a -x Perch >/dev/null 2>&1 || true
+    if ! wait_for_exit 5; then
+      pkill -9 -a -x Perch >/dev/null 2>&1 || true
+      wait_for_exit 3 || fail "couldn't close the running Perch. Quit it from its menu bar icon, then try again."
+    fi
+  fi
 fi
 
 # Replace in place at the same path, so macOS keeps Perch's login item.

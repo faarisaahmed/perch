@@ -24,10 +24,13 @@ export class PointerInput {
   // onSwipe(dir): a swipe sideways (two fingers on a touchpad, three on a touch screen; +1 next, -1 previous) or up
   // and down with three fingers ('up', 'down'). swipesOn(): whether a touchpad's sideways swipe is one (or scrolls).
   // layout: {get(), pan(p)}: the picture's shape and where a "fill" picture has slid to (coords.js), and sliding it.
+  // onEdge(pos, push, locked): every mouse or pen position (0..1), for the edge flip (displays.js); `push` is how far a
+  // captured mouse tried to go past the picture's edge. It may answer a new position for a captured mouse (where it
+  // comes in on the display beyond). Called with null when the pointer leaves the picture.
   constructor({ surface, video, session, view, size, enabled = () => true, onActivity = () => {}, touchpad = () => false,
-    onSwipe = () => {}, swipesOn = () => false, layout = { get: () => FIT, pan: () => {} }, mouseSpeed = () => 1 }) {
+    onSwipe = () => {}, swipesOn = () => false, layout = { get: () => FIT, pan: () => {} }, mouseSpeed = () => 1, onEdge = () => null }) {
     // mouseSpeed(): how far a captured mouse moves the Mac's pointer, 1 = as far as on this screen.
-    Object.assign(this, { surface, video, session, view, size, enabled, onActivity, touchpad, onSwipe, swipesOn, layout, mouseSpeed });
+    Object.assign(this, { surface, video, session, view, size, enabled, onActivity, touchpad, onSwipe, swipesOn, layout, mouseSpeed, onEdge });
     this.swipe = new SwipeDetector();
     this.clicks = new ClickCounter();
     this.wheel = new WheelAccumulator();
@@ -51,6 +54,7 @@ export class PointerInput {
     on(s, 'pointermove', e => this._move(e));
     on(s, 'pointerup', e => this._up(e));
     on(s, 'pointercancel', e => this._cancel(e));
+    on(s, 'pointerleave', e => { if (e.pointerType !== 'touch' && !this.locked) this.onEdge(null, 0, false); });
     on(s, 'lostpointercapture', e => { if (e.pointerType !== 'touch') this._releaseButtons(e); });
     on(s, 'wheel', e => this._wheel(e), { passive: false });
     on(s, 'contextmenu', e => e.preventDefault());
@@ -144,7 +148,10 @@ export class PointerInput {
       const k = Math.min(MAX_SPEED, Math.max(MIN_SPEED, Number(this.mouseSpeed()) || 1));
       const dx = e.movementX * k / sw, dy = e.movementY * k / sh;
       const clamp = v => Math.min(1, Math.max(0, v));
-      this.last = { x: clamp(this.last.x + dx), y: clamp(this.last.y + dy) };
+      const rx = this.last.x + dx, ry = this.last.y + dy;
+      this.last = { x: clamp(rx), y: clamp(ry) };
+      const across = this.onEdge({ ...this.last }, Math.max(0, rx - 1, -rx, ry - 1, -ry), true);
+      if (across) this.last = { x: across.x, y: across.y };
       this._followLast();
       // Several moves between two screen refreshes go out as one: the newest position, and all the movement.
       const m = this.pendingMove?.dx !== undefined ? this.pendingMove : { dx: 0, dy: 0 };
@@ -153,6 +160,7 @@ export class PointerInput {
       return;
     }
     const p = this.pos(e);
+    this.onEdge(p, 0, false);
     this._queueMove(p.x, p.y);
   }
 

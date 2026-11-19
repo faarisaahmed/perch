@@ -83,6 +83,8 @@ async function click(page, selector) {
   const box = await evaluate(page, `(() => {
     const el = document.querySelector(${q(selector)});
     if (!el) return { missing: true };
+    // As an in-page link would: choose the tab it's in, or open the folded setup steps.
+    el.dispatchEvent(new CustomEvent('perch:reveal', { bubbles: true }));
     el.scrollIntoView({ block: 'center' });
     const r = el.getBoundingClientRect();
     if (!r.width || !r.height) return { hidden: true };
@@ -102,7 +104,8 @@ async function click(page, selector) {
 
 // Focuses a field, selects what's in it and types over it.
 async function type(page, selector, textToType) {
-  await evaluate(page, `(() => { const el = document.querySelector(${q(selector)}); el.focus(); el.select?.(); })()`);
+  await evaluate(page, `(() => { const el = document.querySelector(${q(selector)});
+    el.dispatchEvent(new CustomEvent('perch:reveal', { bubbles: true })); el.focus(); el.select?.(); })()`);
   await page.send('Input.insertText', { text: textToType });
 }
 
@@ -580,6 +583,23 @@ test('Setup page: every step in a real browser', { skip: !existsSync(CHROME) && 
     mock.changed();
     await waitFor(page, `[...document.getElementById('setMicOutput').options].some(o => o.textContent === 'An output that is not connected' && o.selected)`);
 
+    // Sound while someone is connected: the two sliders, saved when let go, shown as percentages.
+    const slide = (id, v) => evaluate(page, `(() => { const s = document.getElementById('${id}');
+      s.dispatchEvent(new CustomEvent('perch:reveal', { bubbles: true })); s.focus(); s.value = '${v}';
+      s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); s.blur(); })()`);
+    assert.equal(await text(page, '#setSpeakersOut'), '100%');
+    await slide('setSpeakers', 0);
+    await until(() => lastPatch()?.macSpeakers === 0, 'Mac speakers silent');
+    assert.equal(await text(page, '#setSpeakersOut'), 'Silent');
+    await slide('setStream', 150);
+    await until(() => lastPatch()?.streamVolume === 1.5, 'sent at 150%');
+    assert.match(await text(page, '#soundHint'), /allow it at the Mac/);
+    // A Mac that can't keep its speakers quiet (older macOS): that slider is off, and the note says why.
+    mock.raw.soundTap = false;
+    mock.changed();
+    await waitFor(page, `document.getElementById('setSpeakers').disabled && /14\\.2/.test(document.getElementById('soundHint').textContent)`);
+    mock.raw.soundTap = true;
+    mock.changed();
     await click(page, 'label.choice:has(input[value=sharp])');
     await until(() => lastPatch()?.quality === 'sharp', 'quality sharp');
     assert.equal(await evaluate(page, `document.querySelector('#setQuality input[value=sharp]').checked`), true);

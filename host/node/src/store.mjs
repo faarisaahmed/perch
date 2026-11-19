@@ -33,6 +33,13 @@ export const DEFAULT_SETTINGS = Object.freeze({
   codeWithPasskey: true,
   codeWithBackup: true,
   codeWithPairing: true,
+  // Install a new version by itself once nobody has been connected for a couple of minutes (off: Setup and the menu
+  // bar say when one is out, and the owner chooses when).
+  autoUpdate: false,
+  // Sound while someone is connected: the Mac's own speakers (0–1; below 1 the Mac's sound is tapped and kept off
+  // them, and Perch plays its own copy at this level) and what is sent to the viewer (0–1.5).
+  macSpeakers: 1,
+  streamVolume: 1,
 });
 
 // Which code setting covers each route.
@@ -274,6 +281,16 @@ export class Store {
     this.config.sites = this.sites.filter(x => x.origin !== origin);
     this.save();
     return this.config.sites.length < before;
+  }
+
+  // --- things Perch did by itself (restarting into an installed update, updating), so a failed try isn't repeated ---
+  autoTriedRecently(kind, version, withinMs, now) {
+    const last = this.config.autoTried?.[kind];
+    return !!last && last.version === version && now - Date.parse(last.at) < withinMs;
+  }
+  noteAutoTry(kind, version, now) {
+    this.config.autoTried = { ...this.config.autoTried, [kind]: { version, at: new Date(now).toISOString() } };
+    this.save();
   }
 
   // --- lockouts ---

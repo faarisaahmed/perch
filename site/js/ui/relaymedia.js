@@ -6,6 +6,7 @@
 // still gets the picture, without sound.
 
 const MAX_DECODE_QUEUE = 4;   // frames waiting to decode before we skip ahead to the next keyframe
+const KEYFRAME_ASK_EVERY_MS = 1000; // while waiting for a keyframe, ask again this often
 const AUDIO_LEAD_S = 0.04;     // how far ahead of "now" sound is scheduled
 const AUDIO_MAX_LAG_S = 0.25;  // more queued than this and we drop back to "now" (latency beats smoothness here)
 
@@ -44,7 +45,7 @@ export class RelayMedia {
     this.codec = null;
     this.waitKey = true;
     this.closed = false;
-    this.stats = { frames: 0, decoded: 0, skipped: 0, audio: 0 };
+    this.stats = { frames: 0, decoded: 0, skipped: 0, audio: 0, bytes: 0 };
     this.audio = null;
     if (typeof globalThis.AudioDecoder === 'function' && typeof globalThis.AudioContext === 'function') {
       try { this._startAudio(); } catch (e) { this.log(`relay sound unavailable: ${e.message}`); this.audio = null; }
@@ -87,18 +88,22 @@ export class RelayMedia {
   video({ keyframe, ptsUs, data }) {
     if (this.closed) return;
     this.stats.frames++;
+    this.stats.bytes += data?.byteLength ?? 0;
     if (keyframe) {
       const codec = codecFromAnnexB(data) ?? this.codec ?? 'avc1.42e01f';
       if (!this.decoder || this.decoder.state === 'closed' || codec !== this.codec) this._configure(codec);
       this.waitKey = false;
     } else if (this.waitKey || !this.decoder) {
+      // Waiting for a keyframe: keep asking (once a second) until one comes. Asking only once could leave the picture
+      // frozen for good if that keyframe never arrived, while the sound and input carried on.
       this.stats.skipped++;
+      this._askKeyframe();
       return;
     } else if (this.decoder.decodeQueueSize > MAX_DECODE_QUEUE) {
       // Falling behind (a slow device): skip to the next keyframe rather than show a picture seconds late.
       this.stats.skipped++;
       this.waitKey = true;
-      this.onKeyframeNeeded();
+      this._askKeyframe(true);
       return;
     }
     try {
@@ -107,6 +112,18 @@ export class RelayMedia {
       this.log(`relay video: ${e.message}`);
       this._reset();
     }
+  }
+
+  // The numbers the Connection details panel shows, in the shape of a WebRTC stats report (viewer/stats.js reads it):
+  // nothing is lost over the relay (it runs over TCP), but frames can be skipped to catch up.
+  statsReport() {
+    const big = this.canvas.width > 16 && this.canvas.height > 16;
+    return new Map([['relay-video', {
+      id: 'relay-video', type: 'inbound-rtp', kind: 'video', timestamp: performance.now(),
+      bytesReceived: this.stats.bytes, packetsReceived: this.stats.frames, packetsLost: 0,
+      framesDecoded: this.stats.decoded, frameWidth: big ? this.canvas.width : null, frameHeight: big ? this.canvas.height : null,
+      decoderImplementation: 'WebCodecs',
+    }]]);
   }
 
   _configure(codec) {
@@ -124,7 +141,16 @@ export class RelayMedia {
     try { if (this.decoder && this.decoder.state !== 'closed') this.decoder.close(); } catch {}
     this.decoder = null;
     this.waitKey = true;
-    if (!this.closed) this.onKeyframeNeeded();
+    if (!this.closed) this._askKeyframe(true);
+  }
+
+  // Asks the Mac for a keyframe: now (`now`), or at most once a second while still waiting for one.
+  _askKeyframe(now = false) {
+    const t = performance.now();
+    if (!now && t - (this.lastAsk ?? -Infinity) < KEYFRAME_ASK_EVERY_MS) return;
+    this.lastAsk = t;
+    this.stats.asked = (this.stats.asked ?? 0) + 1;
+    this.onKeyframeNeeded();
   }
 
   _draw(frame) {

@@ -6,8 +6,9 @@
 import { PointerInput } from './pointer.js';
 import { KeyboardInput } from './keyboard.js';
 import { Banners } from './banners.js';
-import { readStats, summarize, linkQuality, QUALITY_WORDS, statsLines } from './stats.js';
+import { readStats, summarize, linkQuality, QUALITY_WORDS, statsLines, selectedRoute } from './stats.js';
 import { IDENTITY, isZoomed, viewTransform, clampView, SHAPES, CENTER, shownScale } from './coords.js';
+import { arrangement, neighbour, entryPoint, EdgeFlip, EDGE_DWELL_MS } from './displays.js';
 import { errorMessage } from '../ui/messages.js';
 import { fillIcons, setIcon } from '../ui/icons.js';
 import { QUALITY } from '../shared/proto.js';
@@ -88,6 +89,7 @@ export class Viewer {
       onSwipe: dir => this._swipe(dir),
       swipesOn: () => this.inputAllowed && this.prefs.get('swipe') in SWIPE_ACTIONS && this.prefs.get('swipe') !== 'off',
       mouseSpeed: () => this.prefs.get('mouseSpeed'),
+      onEdge: (p, push, locked) => this._edge(p, push, locked),
     });
     this.keys = new KeyboardInput({
       surface: this.surface, softkbd: this.$('softkbd'), keysBar: this.$('keysBar'), session,
@@ -298,6 +300,7 @@ export class Viewer {
     }
     if (st.width > 0 && st.height > 0) { this.display.width = st.width; this.display.height = st.height; }
     if (Array.isArray(st.displays)) this._setDisplays(st.displays, st.display);
+    if (st.levels && typeof st.levels === 'object') this._showLevels(st.levels);
     // Which window is being shown, if any. Just after choosing one here the Mac's older notes still say otherwise.
     if ('window' in st && performance.now() >= (this.windowChosenAt ?? -Infinity) + 1500) this._showWindow(st.window ?? null);
   }
@@ -647,7 +650,8 @@ export class Viewer {
     dot.title = QUALITY_WORDS[q];
     const panel = this.$('stats');
     if (panel.hidden) return;
-    const lines = statsLines(sum, { pingMs: this.pingMs, decoder: snap.video?.decoder });
+    const route = this.session.via === 'relay' ? 'worker' : selectedRoute(report);
+    const lines = statsLines(sum, { pingMs: this.pingMs, decoder: snap.video?.decoder, route });
     if (this.status.fps != null || this.status.kbps != null) {
       lines.push(['Mac sends', `${this.status.fps ?? '–'} fps, ${this.status.kbps ?? '–'} kbit/s`]);
     }
@@ -739,16 +743,14 @@ export class Viewer {
     const fast = $('tbQuality').querySelector('option[value="fast"]');
     fast.hidden = fast.disabled = !this.session.caps?.includes('fps60');
 
-    const sel = $('tbDisplay');
+    // Which display: a button for each (shaped like it), a map of how they're arranged, and the edge flip.
+    this.edgeFlip = new EdgeFlip((edge, along) => (this.guest ? null : neighbour(this.displays ?? [], this._shownDisplay(), edge, along)));
     this._setDisplays(Array.isArray(this.ready.displays) ? this.ready.displays : [], this.display.id);
-    on('tbDisplay', 'change', () => {
-      const d = this.displays.find(x => String(x.id) === sel.value);
-      if (!d) return;
-      this.display = { id: d.id, width: d.width, height: d.height };
-      this._showWindow(null); // a window chosen on the other display doesn't carry over
-      this.session.send({ t: 'display', id: d.id });
-      this.setView(IDENTITY);
-    });
+    on('tbDisplayMap', 'click', () => this._toggleDisplayMap());
+    this._on($('displayMap'), 'keydown', e => { if (e.key === 'Escape') { e.preventDefault(); this._toggleDisplayMap(false); $('tbDisplayMap').focus(); } });
+    this._on(document, 'pointerdown', e => {
+      if (!$('displayMap').hidden && !e.target.closest?.('#displayMap, #tbDisplayMap')) this._toggleDisplayMap(false);
+    }, true);
 
     // On a phone the toolbar can't hold everything, so the two pickers live in the More menu there.
     // So do they when the bar stands up on the left or right.
@@ -756,8 +758,8 @@ export class Viewer {
     this._placePickers = () => {
       const pickers = [$('tbQuality').closest('label'), $('tbDisplayWrap')];
       const menu = (narrow.matches || this.root.classList.contains('tb-vertical')) && !this.guest;
-      // In the menu they go under "This bar"'s settings, before "The Mac".
-      if (menu && pickers[0].parentElement !== $('moreMenu')) $('macHead').before(...pickers);
+      // In the menu they go under "This bar"'s settings, before "Sound" and "The Mac".
+      if (menu && pickers[0].parentElement !== $('moreMenu')) $('levelsWrap').before(...pickers);
       else if (!menu && pickers[0].parentElement !== $('toolbar')) $('tbKeyboard').before(...pickers);
     };
     this._placePickers();
@@ -876,6 +878,20 @@ export class Viewer {
     on('clipClose', 'click', () => this._closeClip());
     this._on($('clipSheet'), 'keydown', e => { if (e.key === 'Escape') { e.preventDefault(); this._closeClip(); } });
 
+    // Sound levels, set on the Mac: what is sent here (0–150%) and its own speakers (0–100%, 0 = silent). Sent while
+    // a slider moves (at most a few times a second) and once more when it's let go; the Mac's status echoes them back.
+    this._showLevels(this.ready.levels);
+    const sendLevels = (final) => {
+      const now = performance.now();
+      if (!final && now - (this.levelsSentAt ?? 0) < 150) return;
+      this.levelsSentAt = now;
+      this.session.send({ t: 'levels', stream: Number($('optStream').value) / 100, speakers: Number($('optSpeakers').value) / 100 });
+    };
+    for (const id of ['optStream', 'optSpeakers']) {
+      on(id, 'input', () => { this._levelText(); sendLevels(false); });
+      on(id, 'change', () => { this.levelsDragged = performance.now(); sendLevels(true); });
+    }
+
     // Talking through the Mac, where the Mac, the browser and the connection all can.
     this.micOn = false;
     $('optMic').hidden = this.guest || !this.session.canMic;
@@ -914,26 +930,170 @@ export class Viewer {
     this._on(this.surface, 'pointerdown', () => { this._toggleMenu(false); this._closeKeysEditor(); });
   }
 
+  // The sound sliders, from the Mac's own levels (ready, then status). Only the owner's viewer, and only where the Mac
+  // knows about them; the speakers slider only where the Mac can keep its speakers quiet.
+  _showLevels(levels) {
+    const wrap = this.$('levelsWrap');
+    const ok = !this.guest && !!levels && this.session.caps?.includes('levels');
+    wrap.hidden = !ok;
+    if (!ok) return;
+    // Just let go of: the Mac's echo of the previous value mustn't pull the slider back.
+    const settling = performance.now() - (this.levelsDragged ?? -Infinity) < 600;
+    const active = document.activeElement;
+    if (typeof levels.stream === 'number' && !settling && active !== this.$('optStream')) this.$('optStream').value = String(Math.round(levels.stream * 100));
+    if (typeof levels.speakers === 'number' && !settling && active !== this.$('optSpeakers')) this.$('optSpeakers').value = String(Math.round(levels.speakers * 100));
+    this.$('optSpeakers').disabled = levels.speakersAvailable !== true;
+    this.$('speakersNote').hidden = levels.speakersAvailable === true;
+    this.$('speakersHelp').hidden = levels.speakersAvailable !== true;
+    this._levelText();
+  }
+
+  _levelText() {
+    this.$('optStreamOut').textContent = `${this.$('optStream').value}%`;
+    this.$('optSpeakersOut').textContent = Number(this.$('optSpeakers').value) === 0 ? 'Silent' : `${this.$('optSpeakers').value}%`;
+  }
+
   // The display picker. Called again when the Mac says its displays changed (one was unplugged or plugged in).
   _setDisplays(displays, shownId) {
+    const ids = (list) => (list ?? []).map(d => `${d.id}:${d.x},${d.y},${d.width},${d.height}`).join(' ');
+    if (ids(displays) !== ids(this.displays)) this.edgeFlip?.reset();
     this.displays = displays;
-    const sel = this.$('tbDisplay');
-    sel.replaceChildren(...displays.map((d, i) => {
-      const o = document.createElement('option');
-      o.value = String(d.id);
-      o.textContent = d.name || `Display ${i + 1}`;
-      return o;
-    }));
     const shown = displays.find(d => d.id === shownId) ?? displays[0];
-    if (shown) {
-      sel.value = String(shown.id);
-      if (this.display.id !== shown.id) {
-        this.display = { id: shown.id, width: shown.width, height: shown.height };
-        this.setView(IDENTITY);
-      }
+    if (shown && this.display.id !== shown.id) {
+      this.display = { id: shown.id, width: shown.width, height: shown.height };
+      this.setView(IDENTITY);
     }
     // A guest can't switch displays (the Mac ignores it), so they aren't offered the picker.
     this.$('tbDisplayWrap').hidden = displays.length < 2 || !!this.guest;
+    if (displays.length < 2) this._toggleDisplayMap(false);
+    this._renderDisplayPicker();
+  }
+
+  _shownDisplay() { return (this.displays ?? []).find(d => d.id === this.display.id) ?? null; }
+
+  // One button per display, numbered, each with a small outline in its own shape; and the map, when it is open.
+  _renderDisplayPicker() {
+    const list = this.displays ?? [];
+    // Only when something changed: rebuilding would take keyboard focus off a button.
+    const key = `${this.display.id}|${list.map(d => `${d.id}:${d.name}:${d.width}x${d.height}:${d.main}`).join(',')}`;
+    if (key === this.pickerKey) { if (!this.$('displayMap').hidden) this._renderDisplayMap(); return; }
+    this.pickerKey = key;
+    const biggest = Math.max(1, ...list.map(d => Math.max(d.width || 0, d.height || 0)));
+    const chips = list.map((d, i) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'tb-chip';
+      b.title = d.name || `Display ${i + 1}`;
+      b.setAttribute('aria-label', `${d.name || `Display ${i + 1}`}${d.main ? ' (has the menu bar)' : ''}`);
+      b.setAttribute('aria-pressed', String(d.id === this.display.id));
+      const shape = document.createElement('span');
+      shape.className = 'shape';
+      // A wider display draws a wider outline; the largest is 18 px across.
+      const k = 18 / biggest;
+      shape.style.width = `${Math.max(8, Math.round((d.width || biggest) * k))}px`;
+      shape.style.height = `${Math.max(6, Math.round((d.height || biggest * 0.6) * k))}px`;
+      b.append(shape, String(i + 1));
+      b.addEventListener('click', () => this._showDisplay(d.id)); // replaced with the button, so not in this.listeners
+      return b;
+    });
+    const box = this.$('tbDisplays');
+    const focused = [...box.children].indexOf(document.activeElement);
+    box.replaceChildren(...chips);
+    if (focused >= 0) chips[focused]?.focus();
+    if (!this.$('displayMap').hidden) this._renderDisplayMap();
+  }
+
+  _renderDisplayMap() {
+    const area = this.$('displayMapArea');
+    const all = arrangement(this.displays ?? []);
+    if (!all.length) { area.replaceChildren(); return; }
+    const minX = Math.min(...all.map(d => d.x)), minY = Math.min(...all.map(d => d.y));
+    const spanX = Math.max(...all.map(d => d.x + d.width)) - minX, spanY = Math.max(...all.map(d => d.y + d.height)) - minY;
+    const boxW = area.clientWidth || 260, boxH = 120;
+    const k = Math.min(boxW / (spanX || 1), boxH / (spanY || 1));
+    const offX = (boxW - spanX * k) / 2, offY = (boxH - spanY * k) / 2;
+    area.replaceChildren(...all.map((d, i) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = `map-display${d.id === this.display.id ? ' on' : ''}${d.main ? ' main' : ''}`;
+      b.setAttribute('aria-pressed', String(d.id === this.display.id));
+      b.title = `${d.name || `Display ${i + 1}`}${d.main ? ' (has the menu bar)' : ''}`;
+      b.textContent = `${i + 1}`;
+      Object.assign(b.style, {
+        left: `${offX + (d.x - minX) * k + 2}px`, top: `${offY + (d.y - minY) * k + 2}px`,
+        width: `${Math.max(14, d.width * k - 4)}px`, height: `${Math.max(12, d.height * k - 4)}px`,
+      });
+      b.addEventListener('click', () => { this._showDisplay(d.id); this.$('tbDisplayMap').focus(); });
+      return b;
+    }));
+  }
+
+  _toggleDisplayMap(open) {
+    const map = this.$('displayMap');
+    const show = (open ?? map.hidden) && (this.displays ?? []).length > 1 && !this.guest;
+    map.hidden = !show;
+    this.$('tbDisplayMap').setAttribute('aria-expanded', String(show));
+    if (show) {
+      this._toggleMenu(false);
+      this._showToolbar();
+      this._renderDisplayMap();
+    }
+  }
+
+  // Show another of the Mac's displays.
+  _showDisplay(id) {
+    const d = (this.displays ?? []).find(x => x.id === id);
+    if (!d || this.guest || d.id === this.display.id) return;
+    this.display = { id: d.id, width: d.width, height: d.height };
+    this._showWindow(null); // a window chosen on the other display doesn't carry over
+    this.session.send({ t: 'display', id: d.id });
+    this.setView(IDENTITY);
+    this._renderDisplayPicker();
+  }
+
+  // The edge flip (displays.js): the pointer waiting at an edge of the picture shows which display is beyond it, and
+  // after EDGE_DWELL_MS (or a captured mouse pushed on past the edge) the view moves there. A captured mouse then comes
+  // in at the facing edge of the new display; an uncaptured one stays where the page's pointer is.
+  _edge(p, push, locked) {
+    clearTimeout(this.edgeTimer);
+    if (!this.edgeFlip) return null;
+    if (!p) { this.edgeFlip.reset(); this._edgeHint(null); return null; }
+    const r = this.edgeFlip.move(p, performance.now(), push);
+    if (r?.flip) return this._edgeFlip(r.flip);
+    this._edgeHint(r?.hint ?? null);
+    if (r?.hint) {
+      const wait = Math.max(0, EDGE_DWELL_MS - (performance.now() - r.hint.since)) + 10;
+      this.edgeTimer = setTimeout(() => {
+        const t = this.edgeFlip.tick(performance.now());
+        if (t?.flip) {
+          const across = this._edgeFlip(t.flip);
+          if (across && this.pointer?.locked) this.pointer.last = across;
+        }
+      }, wait);
+    }
+    return null;
+  }
+
+  _edgeFlip(f) {
+    this._edgeHint(null);
+    const from = this._shownDisplay();
+    this._showDisplay(f.target.id);
+    return from ? entryPoint(this.displays, from, f.target, f.edge, f.along) : null;
+  }
+
+  _edgeHint(hint) {
+    const el = this.$('edgeHint');
+    if (!hint) { el.hidden = true; this.edgeHintKey = null; return; }
+    const key = `${hint.edge}:${hint.target.id}:${hint.since}`;
+    if (key === this.edgeHintKey) return;
+    this.edgeHintKey = key;
+    const name = hint.target.name || 'the next display';
+    const arrow = { right: '→', left: '←', top: '↑', bottom: '↓' }[hint.edge];
+    this.$('edgeHintText').textContent = hint.edge === 'left' || hint.edge === 'top' ? `${arrow} ${name}` : `${name} ${arrow}`;
+    el.className = `edge-hint at-${hint.edge}`;
+    el.hidden = false;
+    void el.offsetWidth; // start the fill from empty
+    el.classList.add('charging');
   }
 
   // Tells the Mac how big its picture is on this screen, in real pixels, so it doesn't send more than can be shown
@@ -970,6 +1130,7 @@ export class Viewer {
     menu.hidden = !show;
     this.$('tbMore').setAttribute('aria-expanded', String(show));
     if (show) {
+      this._toggleDisplayMap(false);
       this._showToolbar();
       if (!this.$('windowWrap').hidden) this.session.send({ t: 'windows' });
     }

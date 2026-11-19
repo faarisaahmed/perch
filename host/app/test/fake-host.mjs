@@ -763,6 +763,73 @@ async function profileChecks() {
   await settled();
 }
 
+// Detail first (the Sharp preset's maxQp): the encoder takes the cap, a cap can change on the running capture without
+// stopping it, and a keyframe asked for still arrives on a link far too slow for the cap (the cap is lifted until one
+// gets through: rate control would otherwise throw every keyframe away).
+async function detailCapChecks() {
+  command('session', { active: true, viewer: 'Chrome on Pixel', route: 'passkey' });
+  let since = got.events.length;
+  let mark = got.video.length;
+  command('capture', { on: true, maxEdge: 1280, fps: 30, kbps: 4000, audio: false, maxQp: 30 });
+  await event('capture-started', { since, ms: 5000 });
+  const first = await until(() => got.video.slice(mark).find(f => f.key), 3000, 'a keyframe with the detail cap');
+  check('detail cap: capture starts and sends a keyframe', !!first);
+  // The same picture with a different cap: no new capture, frames keep coming.
+  since = got.events.length;
+  await sleep(500);
+  command('capture', { on: true, maxEdge: 1280, fps: 30, kbps: 4000, audio: false, maxQp: 26 });
+  await event('capture-started', { since, ms: 5000 });
+  mark = got.video.length;
+  await sleep(1000);
+  check('detail cap: changed on the running capture, frames keep coming',
+    !got.events.slice(since).some(x => x.ev.e === 'capture-stopped') && got.video.length - mark > 5,
+    `${got.video.length - mark} frames`);
+  // The strictest cap on the slowest bitrate: keyframes asked for still come.
+  since = got.events.length;
+  command('capture', { on: true, maxEdge: 1280, fps: 30, kbps: 100, audio: false, maxQp: 18 });
+  await event('capture-started', { since, ms: 5000 });
+  await sleep(1500);
+  let delivered = 0;
+  for (let i = 0; i < 3; i++) {
+    mark = got.video.length;
+    command('keyframe', {});
+    if (await until(() => got.video.slice(mark).find(f => f.key), 3000, 'a keyframe').catch(() => null)) delivered++;
+    await sleep(600);
+  }
+  check('detail cap: a keyframe asked for arrives even at 100 kbit/s with cap 18', delivered === 3, `${delivered} of 3`);
+  since = got.events.length;
+  command('capture', { on: false });
+  await event('capture-stopped', { since });
+  command('session', { active: false });
+  await settled();
+}
+
+// Sound levels (Mac speakers, what is sent): taken with the capture command and on their own mid-session, without
+// stopping the capture or the sound. (The test tone has no speakers to keep quiet: the tap isn't used here.)
+async function soundLevelChecks() {
+  command('session', { active: true, viewer: 'Chrome on Pixel', route: 'passkey' });
+  let since = got.events.length;
+  command('capture', { on: true, maxEdge: 1280, fps: 30, kbps: 4000, audio: true, speakers: 0, stream: 1.5 });
+  await event('capture-started', { since, ms: 5000 });
+  let mark = got.audio.length;
+  await sleep(600);
+  check('sound levels: sound flows with levels in the capture command', got.audio.length - mark > 10, `${got.audio.length - mark} packets`);
+  since = got.events.length;
+  mark = got.audio.length;
+  command('audio-levels', { stream: 0 });
+  command('audio-levels', { speakers: 1, stream: 0.4 });
+  command('audio-levels', { speakers: 'loud' });
+  await sleep(800);
+  check('sound levels: changed mid-session, the capture and the sound carry on',
+    !got.events.slice(since).some(x => x.ev.e === 'capture-stopped' || x.ev.e === 'capture-error') && got.audio.length - mark > 20,
+    `${got.audio.length - mark} packets`);
+  since = got.events.length;
+  command('capture', { on: false });
+  await event('capture-stopped', { since });
+  command('session', { active: false });
+  await settled();
+}
+
 // 30 to 60 frames a second and back, on the running capture: no stop, sound keeps coming, frames at the new rate.
 async function fpsChangeChecks() {
   command('session', { active: true, viewer: 'Chrome on Pixel', route: 'passkey' });
@@ -1092,6 +1159,10 @@ async function main() {
   await section('text focus', () => textFocusChecks());
   await section('special keys', () => systemKeyChecks());
   await section('H.264 profile', () => profileChecks());
+  await section('detail cap', () => detailCapChecks());
+  // Synthetic only: speakers below 100% on the real screen would start a real sound tap, and macOS would ask for
+  // System Audio Recording in the middle of a test run.
+  if (h.synthetic === true) await section('sound levels', () => soundLevelChecks());
   if (h.synthetic === true) await section('frame rate', () => fpsChangeChecks());
   await section('clipboard', () => clipboardChecks());
   await section('windows', () => windowChecks(h));

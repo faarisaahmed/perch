@@ -1,26 +1,28 @@
-// Settings: each change is saved straight away (no Save button). If Perch refuses one, the control goes back to
-// what it was and the reason is shown underneath.
+// Settings, in three cards (the 6-digit code switches, video quality, and "This Mac"): each change is saved straight
+// away (no Save button). If Perch refuses one, the control goes back to what it was and the reason is shown in that
+// control's own card.
 import { $, setText, show, say } from '../lib/dom.js';
 
 const IDLE_LABEL = (m) => (m === 0 ? 'Never' : m % 60 === 0 ? `${m / 60} hour${m === 60 ? '' : 's'}` : `${m} minutes`);
 
 export function settings(ctx) {
-  const error = $('settingsError');
-  const saved = $('settingsSaved');
   const idle = $('setIdle');
   const micOutput = $('setMicOutput');
   const pending = new Set(); // settings being saved right now: live updates don't overwrite them meanwhile
-  let savedTimer = null;
+  const savedTimers = new Map();
 
-  async function save(key, value, revert) {
+  async function save(control, key, value, revert) {
+    const card = control.closest('.card');
+    const saved = card.querySelector('.saved');
+    const error = card.querySelector('.msg.bad');
     pending.add(key);
     say(error, '');
     setText(saved, 'Saving…');
     try {
       await ctx.post('updateSettings', { patch: { [key]: value } });
       setText(saved, 'Saved.');
-      clearTimeout(savedTimer);
-      savedTimer = setTimeout(() => setText(saved, ''), 2500);
+      clearTimeout(savedTimers.get(card));
+      savedTimers.set(card, setTimeout(() => setText(saved, ''), 2500));
     } catch (e) {
       revert();
       setText(saved, '');
@@ -31,25 +33,40 @@ export function settings(ctx) {
     }
   }
 
-  for (const input of document.querySelectorAll('#settingsCard input[data-setting]')) {
+  const switches = [...document.querySelectorAll('input[data-setting]')];
+  // The two sound sliders: shown as percentages, saved when let go (a level of 0–1, or 0–1.5 for what is sent).
+  const sliders = [...document.querySelectorAll('input[type=range][data-level]')];
+  const showLevel = (input) => setText($(`${input.id}Out`),
+    input.id === 'setSpeakers' && Number(input.value) === 0 ? 'Silent' : `${input.value}%`);
+  for (const input of sliders) {
+    input.addEventListener('input', () => showLevel(input));
+    input.addEventListener('change', () => {
+      const before = ctx.state?.settings?.[input.dataset.level];
+      save(input, input.dataset.level, Number(input.value) / 100, () => {
+        if (typeof before === 'number') input.value = String(Math.round(before * 100));
+        showLevel(input);
+      });
+    });
+  }
+  for (const input of switches) {
     input.addEventListener('change', () => {
       const want = input.checked;
-      save(input.dataset.setting, want, () => { input.checked = !want; });
+      save(input, input.dataset.setting, want, () => { input.checked = !want; });
     });
   }
   idle.addEventListener('change', () => {
     const before = String(ctx.state?.settings?.idleMinutes ?? '');
-    save('idleMinutes', Number(idle.value), () => { idle.value = before; });
+    save(idle, 'idleMinutes', Number(idle.value), () => { idle.value = before; });
   });
   micOutput.addEventListener('change', () => {
     const before = ctx.state?.settings?.micOutput ?? '';
-    save('micOutput', micOutput.value, () => { micOutput.value = before; });
+    save(micOutput, 'micOutput', micOutput.value, () => { micOutput.value = before; });
   });
   for (const radio of document.querySelectorAll('#setQuality input[type=radio]')) {
     radio.addEventListener('change', () => {
       if (!radio.checked) return;
       const before = ctx.state?.settings?.quality;
-      save('quality', radio.value, () => {
+      save(radio, 'quality', radio.value, () => {
         for (const r of document.querySelectorAll('#setQuality input[type=radio]')) r.checked = r.value === before;
       });
     });
@@ -58,9 +75,25 @@ export function settings(ctx) {
   function render(st) {
     if (!st) return;
     const s = st.settings ?? {};
-    for (const input of document.querySelectorAll('#settingsCard input[data-setting]')) {
+    for (const input of switches) {
       if (!pending.has(input.dataset.setting)) input.checked = s[input.dataset.setting] === true;
     }
+    for (const input of sliders) {
+      const v = s[input.dataset.level];
+      // Not while it's being dragged or saved: a live update would snap it back.
+      if (typeof v === 'number' && !pending.has(input.dataset.level) && document.activeElement !== input) {
+        input.value = String(Math.round(v * 100));
+      }
+      showLevel(input);
+    }
+    // Keeping the Mac's speakers quiet needs the sound tap (macOS 14.2 and later).
+    const tap = st.soundTap === true;
+    $('setSpeakers').disabled = !tap;
+    setText($('soundHint'), tap
+      ? 'These only apply while you\'re connected; afterwards the Mac sounds as usual. At Silent nobody near the Mac ' +
+        'hears anything, and you still hear everything on your device. The first time you lower the speakers, macOS asks ' +
+        'to let Perch record this Mac\'s sound: allow it at the Mac.'
+      : 'This Mac\'s speakers always play as usual while you\'re connected: keeping them quiet needs macOS 14.2 or later.');
     if (!pending.has('idleMinutes') && typeof s.idleMinutes === 'number') {
       const v = String(s.idleMinutes);
       // A value Perch allows but this list doesn't offer still shows correctly.

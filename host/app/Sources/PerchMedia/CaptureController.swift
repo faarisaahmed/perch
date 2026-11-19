@@ -53,11 +53,15 @@ final class AudioPipeline {
     private let encoder: OpusEncoder
     private let clock = MonotonicClock()
     var onPacket: ((UInt64, Data) -> Void)?
+    /// How loud what is sent is ("sent to this device", AudioLevels.stream).
+    var gain = GainStage()
 
     init() throws { encoder = try OpusEncoder(channels: 2, bitRate: 64_000) }
 
-    /// `pts` is the time of the first frame in `pcm` (interleaved stereo).
+    /// `pts` is the time of the first frame in `pcm` (interleaved stereo, 48 kHz).
     func feed(_ pcm: [Float], pts: UInt64) {
+        var pcm = pcm
+        gain.apply(&pcm)
         // Frames still waiting from the previous buffer come first in the next packet.
         var t = Double(pts) - Double(encoder.bufferedFrames) * 1_000_000 / Double(OpusEncoder.sampleRate)
         for packet in encoder.encode(pcm) {
@@ -101,6 +105,10 @@ final class CaptureSession: @unchecked Sendable {
     private var encoder: H264Encoder
     private var capturer: ScreenCapturer?
     private var audio: AudioPipeline?
+    /// The sound levels, and whether the sound comes from CaptureController's tap (SoundTapper) instead of
+    /// ScreenCaptureKit. Audio queue only.
+    private var levels = AudioLevels.normal
+    private var tapFed = false
     private var videoTimers: [DispatchSourceTimer] = []
     private var toneTimer: DispatchSourceTimer?
     private var lastPixelBuffer: CVPixelBuffer?
@@ -110,6 +118,13 @@ final class CaptureSession: @unchecked Sendable {
     /// Set (on VideoToolbox's thread) when rate control threw away the newest picture, cleared when one gets through.
     private let dropLock = NSLock()
     private var newestWasDropped = false
+    /// Forced keyframes rate control has thrown away in a row (dropLock).
+    private var keyframeDrops = 0
+    /// The detail cap is lifted for now, so a keyframe can get through (video queue).
+    private var qpRelaxed = false
+    /// With a detail cap (request.maxQP) rate control can throw away the keyframe a viewer is waiting for, again and
+    /// again on a slow link. After this many in a row the cap is lifted until a keyframe gets through, then put back.
+    static let keyframeDropsBeforeRelax = 2
 
     /// With nothing new on screen, send the last picture again this often so the viewer's stream stays alive.
     static let repeatAfterMicros: UInt64 = 1_000_000
@@ -151,30 +166,67 @@ final class CaptureSession: @unchecked Sendable {
         let size = Self.outputSize(display: display, region: region, maxEdge: request.maxEdge)
         width = size.width
         height = size.height
-        encoder = try H264Encoder(width: width, height: height, fps: request.fps, bitsPerSecond: request.kbps * 1000, high: request.high)
+        encoder = try H264Encoder(width: width, height: height, fps: request.fps, bitsPerSecond: request.kbps * 1000, high: request.high,
+                                  maxQP: request.maxQP)
         shownProfile = Self.name(encoder)
         encoder.warmUp(ptsMicros: hostMicros())
         wire(encoder)
     }
 
     private func wire(_ e: H264Encoder) {
-        e.onFrame = { [weak self] frame in
+        e.onFrame = { [weak self, weak e] frame in
             guard let self else { return }
-            self.dropLock.withLock { self.newestWasDropped = false }
+            let gotKeyframe = self.dropLock.withLock { () -> Bool in
+                self.newestWasDropped = false
+                if frame.isKeyframe { self.keyframeDrops = 0 }
+                return frame.isKeyframe
+            }
+            if gotKeyframe, let e { self.videoQueue.async { self.restoreQP(e) } }
             guard self.gate.admit(frame, canSend: self.canSend()) else { return }
             self.onVideo?(frame)
         }
-        e.onDrop = { [weak self] _, _ in
+        e.onDrop = { [weak self, weak e] _, wasForcedKeyframe in
             guard let self else { return }
-            self.dropLock.withLock { self.newestWasDropped = true }
+            let relax = self.dropLock.withLock { () -> Bool in
+                self.newestWasDropped = true
+                guard wasForcedKeyframe else { return false }
+                self.keyframeDrops += 1
+                return self.keyframeDrops >= Self.keyframeDropsBeforeRelax
+            }
+            if relax, let e { self.videoQueue.async { self.relaxQP(e) } }
+        }
+    }
+
+    /// Video queue: lift the detail cap so the keyframe being retried can get through.
+    private func relaxQP(_ e: H264Encoder) {
+        guard e === encoder, request.maxQP != nil, !qpRelaxed else { return }
+        qpRelaxed = true
+        e.setMaxQP(nil)
+        log("detail cap lifted until a keyframe gets through (rate control dropped \(Self.keyframeDropsBeforeRelax) in a row)")
+    }
+
+    /// Video queue: a keyframe got through, so put the detail cap back.
+    private func restoreQP(_ e: H264Encoder) {
+        guard e === encoder, qpRelaxed else { return }
+        qpRelaxed = false
+        e.setMaxQP(request.maxQP)
+    }
+
+    /// A new detail cap (nil: none) on the running encoder. No new encoder is needed, so no keyframe either.
+    func setMaxQP(_ qp: Int?) {
+        videoQueue.sync {
+            request.maxQP = qp
+            qpRelaxed = false
+            encoder.setMaxQP(qp)
         }
     }
 
     /// Changes the picture size while capture keeps running: a new encoder, the stream told its new size, and a
     /// keyframe to start from. Much lighter than stopping and starting (no gap in the sound, no display lookup).
-    func resize(width w: Int, height h: Int, kbps: Int, region r: CGRect? = nil, windowID wid: UInt32? = nil, fps: Int? = nil) async throws {
+    func resize(width w: Int, height h: Int, kbps: Int, region r: CGRect? = nil, windowID wid: UInt32? = nil, fps: Int? = nil,
+                maxQP: Int?) async throws {
         let rate = fps ?? request.fps
-        let fresh = try H264Encoder(width: w, height: h, fps: rate, bitsPerSecond: kbps * 1000, high: request.high)
+        let fresh = try H264Encoder(width: w, height: h, fps: rate, bitsPerSecond: kbps * 1000, high: request.high, maxQP: maxQP)
         fresh.warmUp(ptsMicros: hostMicros())
         wire(fresh)
         videoQueue.sync {
@@ -186,6 +238,9 @@ final class CaptureSession: @unchecked Sendable {
             height = h
             request.kbps = kbps
             request.fps = rate
+            request.maxQP = maxQP
+            qpRelaxed = false
+            dropLock.withLock { keyframeDrops = 0 }
             whereLock.withLock { shownRegion = r; shownWindow = r == nil ? nil : wid; shownProfile = Self.name(fresh) }
             lastPixelBuffer = nil // the old size; a picture of the new size arrives in a moment
             gate.request()
@@ -312,7 +367,26 @@ final class CaptureSession: @unchecked Sendable {
 
     // MARK: audio queue
 
+    /// New sound levels (any thread): what is sent. (The speakers are SoundTapper's.)
+    func setLevels(_ new: AudioLevels) {
+        audioQueue.async { [self] in
+            levels = new
+            audio?.gain.target = Float(new.stream)
+        }
+    }
+
+    /// Whether the sound comes from the tap now (any thread).
+    func setTapFed(_ on: Bool) { audioQueue.async { [self] in tapFed = on } }
+
+    /// Sound from the tap: 48 kHz interleaved stereo. Audio queue.
+    func fromTap(_ pcm: [Float], pts: UInt64) {
+        guard tapFed else { return }
+        audio?.feed(pcm, pts: pts)
+    }
+
     private func audioArrived(_ sb: CMSampleBuffer) {
+        // While the tap runs it is the sound (ScreenCaptureKit's copy would play twice).
+        if tapFed { return }
         guard let pcm = ScreenCapturer.interleavedFloat32(from: sb) else { return }
         audio?.feed(pcm, pts: micros(CMSampleBufferGetPresentationTimeStamp(sb)) ?? hostMicros())
     }
@@ -358,6 +432,45 @@ public final class CaptureController: @unchecked Sendable {
     private var generation = 0
     private var current: CaptureSession?
     private var pendingKbps: Int?
+    /// The sound levels the host last asked for (lock); every session gets them.
+    private var levels = AudioLevels.normal
+    public var audioLevels: AudioLevels { lock.withLock { levels } }
+
+    /// The Mac's sound kept off its speakers (below 100%), for as long as capture is wanted (lock). Outlives the
+    /// capture sessions inside one viewer session, so the speakers never play between one capture and the next.
+    private var tapper: SoundTapper?
+
+    /// New sound levels: "Mac speakers" and "sent to this device". Any thread.
+    public func setAudioLevels(_ new: AudioLevels) {
+        let (cur, wanted) = lock.withLock { () -> (CaptureSession?, Bool) in levels = new; return (current, lastRequest?.audio == true) }
+        cur?.setLevels(new)
+        lock.withLock { tapper }?.setSpeakers(new.speakers)
+        if wanted { ensureTap() }
+    }
+
+    /// Starts the tap if the speakers are to be quieter than usual and there is no tap yet. Any thread.
+    private func ensureTap() {
+        guard !synthetic, SoundTap.available else { return }
+        let start = lock.withLock { () -> AudioLevels? in
+            guard tapper == nil, levels.quietSpeakers else { return nil }
+            return levels
+        }
+        guard let levels = start else { return }
+        let t = SoundTapper()
+        t.log = { [weak self] in self?.log($0) }
+        t.onPCM = { [weak self] pcm, pts in
+            guard let self else { return }
+            self.audioQueue.async { self.lock.withLock { self.current }?.fromTap(pcm, pts: pts) }
+        }
+        guard t.start(speakers: levels.speakers, stream: levels.stream) else { return }
+        let cur = lock.withLock { () -> CaptureSession? in tapper = t; return current }
+        cur?.setTapFed(true)
+    }
+
+    private func stopTap() {
+        let t = lock.withLock { () -> SoundTapper? in defer { tapper = nil }; return tapper }
+        t?.stop()
+    }
     /// What the host last asked for, so capture can be restarted by itself when the system stops it.
     private var excludedWindows: [CGWindowID] = []
     private var lastRequest: CaptureRequest?
@@ -438,6 +551,7 @@ public final class CaptureController: @unchecked Sendable {
         enqueue { [self] in
             guard isLatest(gen) else { return }
             await teardown()
+            stopTap() // the session is over: the Mac's speakers play as before
             if notify { onEvent?(["e": "capture-stopped", "reason": reason]) }
         }
     }
@@ -504,9 +618,13 @@ public final class CaptureController: @unchecked Sendable {
         let size = CaptureSession.outputSize(display: display, region: region, maxEdge: request.maxEdge)
         if let cur = lock.withLock({ current }), cur.display.id == display.id, cur.width == size.width, cur.height == size.height,
            cur.region == region, cur.request.fps == request.fps, cur.request.audio == request.audio, cur.request.high == request.high {
-            // Same picture: keep the stream running, take the new bitrate, and send a keyframe so whoever asked
-            // can start at once.
+            // Same picture: keep the stream running, take the new bitrate (and detail cap), and send a keyframe so
+            // whoever asked can start at once.
             cur.setBitrate(kbps: request.kbps)
+            if cur.request.maxQP != request.maxQP {
+                cur.setMaxQP(request.maxQP)
+                log("detail cap now \(request.maxQP.map { "QP \($0)" } ?? "off")")
+            }
             cur.keyframe()
             emitStarted(cur)
             return
@@ -517,8 +635,8 @@ public final class CaptureController: @unchecked Sendable {
             // a new encoder on the running stream, so the sound carries on.
             do {
                 try await cur.resize(width: size.width, height: size.height, kbps: request.kbps, region: region, windowID: request.window,
-                                     fps: request.fps)
-                log("capture changed to \(size.width)x\(size.height) at \(request.fps) fps, \(request.kbps) kbit/s\(region == nil ? "" : ", one window")")
+                                     fps: request.fps, maxQP: request.maxQP)
+                log("capture changed to \(size.width)x\(size.height) at \(request.fps) fps, \(request.kbps) kbit/s\(Self.capNote(request))\(region == nil ? "" : ", one window")")
                 emitStarted(cur)
                 return
             } catch {
@@ -532,6 +650,8 @@ public final class CaptureController: @unchecked Sendable {
             return
         }
         await teardown()
+        // Speakers to be kept quiet: the tap first, so not a moment of the Mac's sound reaches them.
+        if request.audio { ensureTap() }
         var session: CaptureSession?
         do {
             let s = try CaptureSession(request: request, display: display, region: region, windowID: request.window,
@@ -546,9 +666,13 @@ public final class CaptureController: @unchecked Sendable {
                 DispatchQueue.main.async { if let self, let s { self.failed(s, error) } }
             }
             try await s.start()
-            let kbps = lock.withLock { () -> Int? in current = s; startedAt = Date(); return pendingKbps }
+            let (kbps, sound, tapped) = lock.withLock { () -> (Int?, AudioLevels, Bool) in
+                current = s; startedAt = Date(); return (pendingKbps, levels, tapper != nil)
+            }
+            s.setLevels(sound)
+            s.setTapFed(tapped)
             if let kbps { s.setBitrate(kbps: kbps) }
-            log("capture started: display \(display.id) at \(s.width)x\(s.height), \(request.fps) fps, \(request.kbps) kbit/s, audio \(request.audio)")
+            log("capture started: display \(display.id) at \(s.width)x\(s.height), \(request.fps) fps, \(request.kbps) kbit/s\(Self.capNote(request)), audio \(request.audio)")
             emitStarted(s)
         } catch {
             await session?.stop()
@@ -584,6 +708,7 @@ public final class CaptureController: @unchecked Sendable {
                 await start(request, generation: gen)
                 return
             }
+            stopTap()
             onEvent?(["e": "capture-error", "code": Self.errorCode(error), "message": Self.message(error)])
             onEvent?(["e": "capture-stopped", "reason": "error"])
         }
@@ -596,6 +721,9 @@ public final class CaptureController: @unchecked Sendable {
         e["profile"] = s.profileName
         onEvent?(e)
     }
+
+    /// ", detail cap QP 30" for the log, or nothing without a cap.
+    static func capNote(_ r: CaptureRequest) -> String { r.maxQP.map { ", detail cap QP \($0)" } ?? "" }
 
     static func errorCode(_ error: Error) -> String {
         let ns = error as NSError

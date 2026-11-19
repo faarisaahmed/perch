@@ -19,6 +19,7 @@
 <script type="module" src="js/connect.js"></script>
 </head>
 <body class="connect">
+<canvas class="cipher" id="cipher" aria-hidden="true"></canvas>
 
 <!-- Shown until the page has checked it is allowed to run here (js/connect.js). -->
 <div id="boot" class="boot" role="status" aria-live="polite">
@@ -197,10 +198,12 @@
         <option value="fast" hidden disabled>Fast (60 fps)</option>
       </select>
     </label>
-    <label class="tb-select" id="tbDisplayWrap" hidden>
-      <span class="sr-only">Which display</span>
-      <select id="tbDisplay" title="Which display"></select>
-    </label>
+    <span class="tb-displays" id="tbDisplayWrap" role="group" aria-label="Which display" hidden>
+      <span class="tb-displays-label" aria-hidden="true">Display</span>
+      <span class="tb-chips" id="tbDisplays"></span>
+      <button type="button" id="tbDisplayMap" class="tb-btn" data-icon="displays" title="Displays, as arranged on the desk"
+        aria-label="Show how the displays are arranged" aria-expanded="false" aria-controls="displayMap"></button>
+    </span>
     <button type="button" id="tbKeyboard" class="tb-btn" data-icon="keyboard" title="Keyboard" aria-label="Show the keyboard" hidden></button>
     <button type="button" id="tbKeys" class="tb-btn tb-text" title="Special keys" aria-label="Special keys" aria-pressed="false">⌘</button>
     <button type="button" id="tbSound" class="tb-btn" data-icon="sound" title="Sound" aria-label="Mute"></button>
@@ -216,6 +219,16 @@
     <button type="button" id="tbBye" class="tb-btn tb-bye" data-icon="power" title="Disconnect" aria-label="Disconnect"></button>
   </div>
 
+  <!-- The Mac's displays as they sit on the desk: choose one (viewer.js, displays.js) -->
+  <div id="displayMap" class="menu display-map" role="group" aria-label="Displays, as arranged" hidden>
+    <p class="menu-head">Displays, as arranged</p>
+    <div class="map-area" id="displayMapArea"></div>
+    <p class="fine">Or hold the pointer at an edge of the picture to move to the display beyond it.</p>
+  </div>
+
+  <!-- The edge flip: which display is beyond the edge the pointer is waiting at -->
+  <div id="edgeHint" class="edge-hint" aria-hidden="true" hidden><span id="edgeHintText"></span><i class="edge-fill"></i></div>
+
   <div id="moreMenu" class="menu" role="group" aria-label="More options" hidden>
     <p class="menu-head">This bar</p>
     <label class="tb-select" id="edgeWrap">
@@ -228,6 +241,16 @@
       </select>
     </label>
     <label class="check"><input type="checkbox" id="optAutoHide"> Hide the bar when I'm not using it</label>
+    <!-- Sound levels, set on the Mac (viewer.js): what is sent here, and the Mac's own speakers -->
+    <div class="levels" id="levelsWrap" role="group" aria-labelledby="soundHead" hidden>
+      <p class="menu-head" id="soundHead">Sound</p>
+      <label class="level" for="optStream"><span>Sent to this device</span>
+        <input type="range" id="optStream" min="0" max="150" step="5"><output id="optStreamOut" for="optStream"></output></label>
+      <label class="level" id="speakersWrap" for="optSpeakers"><span>On the Mac's speakers</span>
+        <input type="range" id="optSpeakers" min="0" max="100" step="5"><output id="optSpeakersOut" for="optSpeakers"></output></label>
+      <p class="fine" id="speakersHelp">Only while you're connected. Silent keeps the Mac quiet; you still hear it here.</p>
+      <p class="fine" id="speakersNote" hidden>Keeping the Mac's speakers quiet needs macOS 14.2 or later on the Mac.</p>
+    </div>
     <p class="menu-head" id="macHead">The Mac</p>
     <button type="button" id="optForceQuit" class="btn small" data-icon="warn" hidden>Force Quit an app…</button>
     <label class="check" id="touchpadWrap" hidden><input type="checkbox" id="optTouchpad"> Touchpad mode</label>

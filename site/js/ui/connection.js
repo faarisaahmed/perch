@@ -50,6 +50,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // An answer with no public (server-reflexive) or relay candidate, though STUN servers were asked: UDP is blocked, so a
 // direct connection can't work from here.
+// How many addresses of each kind an SDP offers (host: this device's own; srflx: as a STUN server saw it; relay: a
+// TURN server's), for the Mac's log when the viewer goes by the relay Worker instead.
+export function candidateCounts(sdp) {
+  const out = { host: 0, srflx: 0, relay: 0 };
+  for (const m of String(sdp ?? '').matchAll(/ typ (host|srflx|relay)\b/g)) out[m[1]]++;
+  return out;
+}
+
 export function looksBlocked(answerSdp, iceServers) {
   if (!iceServers?.length || typeof answerSdp !== 'string') return false;
   return !/ typ (srflx|relay)\b/.test(answerSdp);
@@ -86,9 +94,11 @@ export class Connection {
   // the Mac has one). allowLocalRelay: accept a loopback relay address (tests on this computer only).
   constructor({ route, hostId, sigKey, macName, pairId, guestId = null, guestSecret = null, label, brokers, iceServers, pin = null,
     certificate = null, log = () => {}, onStage = () => {}, PeerConnection = globalThis.RTCPeerConnection,
-    transport = 'auto', allowLocalRelay = false, WebSocketImpl = globalThis.WebSocket }) {
+    transport = 'auto', allowLocalRelay = false, WebSocketImpl = globalThis.WebSocket, early = null }) {
+    // early: {hello(), offer(first)} for a sign-in that starts at the meeting point (signin.js backupEarly): more for the
+    // hello, and a look at the offer before connecting that may throw (a wrong password), which cancels with the Mac.
     Object.assign(this, { route, hostId, sigKey, macName, pairId, guestId, guestSecret, label, brokers, iceServers, pin, certificate,
-      log, onStage, PeerConnection, transport, allowLocalRelay, WebSocketImpl });
+      log, onStage, PeerConnection, transport, allowLocalRelay, WebSocketImpl, early });
     this.sid = toB64url(randomBytes(16));
     this.rdv = null;
     this.pc = null;
@@ -156,12 +166,22 @@ export class Connection {
     await this.rdv.send(topic, key, {
       t: 'hello', sid: this.sid, pv: PROTO, route, label: this.label,
       ...(this.pairId ? { pairId: toB64url(this.pairId) } : {}),
+      ...(this.early?.hello?.() ?? {}),
     });
     const first = await this._race(reply, OFFER_TIMEOUT_MS, () => new PerchError('timeout'));
     if (first.t === 'refuse') {
       throw this._fail(new PerchError('refuse', { reason: first.reason, retryAfter: first.retryAfter, hv: first.hv }));
     }
     if (!(Number(first.pv) >= MIN_PEER_PROTO) || typeof first.sdp !== 'string') throw this._fail(new PerchError('old-mac'));
+    if (this.early) {
+      try {
+        await this.early.offer(first);
+      } catch (e) {
+        // Wrong (the password): say so to the Mac, which frees the place this sign-in held, and stop before connecting.
+        await this.rdv.send(topic, key, { t: 'cancel', sid: this.sid, reason: e?.kind ?? 'cancelled' }).catch(() => {});
+        throw this._fail(e instanceof PerchError ? e : new PerchError('unexpected', { message: e?.message }));
+      }
+    }
     this.hv = first.hv;
     this.caps = Array.isArray(first.caps) ? first.caps.filter(c => typeof c === 'string') : [];
 
@@ -171,17 +191,19 @@ export class Connection {
     this.relayServers = cleanIceServers(first.iceServers);
     this.relayOffer = typeof first.ws === 'string' && relayMediaSupported() ? first.ws : null;
     if (this.relayOffer && this.transport === 'relay') {
+      this.relayWhy = { reason: 'asked' };
       await this._answerRelay();
     } else {
       await this._answer();
       if (this.relayOffer && this.transport === 'auto' && looksBlocked(this.answerSdp, this.iceServers)) {
         // Not even a STUN server answered: this network blocks what WebRTC needs. Don't wait for it to fail.
         this.log('this network seems to block direct connections: using the Mac’s Worker relay');
+        this.relayWhy = { reason: 'blocked', cands: candidateCounts(this.answerSdp) };
         this._dropPeerConnection();
         await this._answerRelay();
       }
     }
-    await this.rdv.send(topic, key, this.via === 'relay' ? { t: 'answer', sid: this.sid, ws: this.answerSdp }
+    await this.rdv.send(topic, key, this.via === 'relay' ? { t: 'answer', sid: this.sid, ws: this.answerSdp, ...(this.relayWhy ? { why: this.relayWhy } : {}) }
       : { t: 'answer', sid: this.sid, sdp: this.answerSdp });
     if (this.via === 'relay') this._openRelaySocket();
 
@@ -241,7 +263,7 @@ export class Connection {
     }
   }
 
-  async getStats() { return this.pc ? this.pc.getStats() : new Map(); }
+  async getStats() { return this.pc ? this.pc.getStats() : (this.media?.statsReport() ?? new Map()); }
 
   // Ends the connection from this side. With bye, tells the Mac first so it can tidy up straight away.
   // --- the viewer's microphone, played on the Mac ---

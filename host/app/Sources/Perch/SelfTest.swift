@@ -367,6 +367,29 @@ enum SelfTest {
             && CaptureRequest(command: ["on": true, "window": 4242]).window == 4242
             && CaptureRequest(command: ["on": true, "window": 0]).window == nil
             && CaptureRequest(command: ["on": true, "window": "7"]).window == nil)
+        // Sound levels: clamped, partly given commands keep the rest, junk is ignored.
+        let lv = AudioLevels(command: ["speakers": 0, "stream": 9])
+        check("sound levels: clamped to 0–1 (speakers) and 0–1.5 (sent)", lv.speakers == 0 && lv.stream == 1.5 && lv.quietSpeakers,
+              "\(lv)")
+        let kept = AudioLevels(command: ["stream": 0.5], base: AudioLevels(speakers: 0.3, stream: 1))
+        check("sound levels: what a command leaves out is kept", kept.speakers == 0.3 && kept.stream == 0.5 && kept.quietSpeakers)
+        check("sound levels: junk and full speakers", AudioLevels(command: ["speakers": "loud", "stream": -1]) == AudioLevels(speakers: 1, stream: 0)
+              && !AudioLevels.normal.quietSpeakers)
+        var stage = GainStage()
+        var samples: [Float] = [0.5, -0.5, 0.5, -0.5]
+        stage.apply(&samples)
+        check("gain: 100% leaves the sound untouched", samples == [0.5, -0.5, 0.5, -0.5])
+        stage.target = 0
+        samples = [Float](repeating: 0.5, count: 8)
+        stage.apply(&samples)
+        check("gain: a new level glides in across the buffer, no click",
+              samples.first! > 0.4 && samples.last! == 0 && zip(samples, samples.dropFirst()).allSatisfy { $0 >= $1 }, "\(samples)")
+        stage.target = 1.5
+        samples = [Float](repeating: 0.9, count: 64)
+        stage.apply(&samples)
+        let loud = samples.last!
+        check("gain: louder than 100% bends towards full scale instead of clipping", loud > 0.9 && loud < 1 && GainStage.limit(-5) >= -1 && GainStage.limit(50) <= 1
+              && GainStage.limit(0.5) == 0.5, "\(loud)")
         let screen = CGRect(x: 1920, y: 0, width: 1512, height: 982)
         check("window region: the part on the display, in the display's own points",
               Windows.region(of: CGRect(x: 2000, y: 100, width: 800, height: 600), on: screen) == CGRect(x: 80, y: 100, width: 800, height: 600)
@@ -454,6 +477,11 @@ enum SelfTest {
         s["update"] = ["version": "0.2.0", "url": "https://example.invalid"]
         check("menu: an available update adds Update to x.y.z…", items(M(status: s, viewer: nil, problem: nil))["Update to 0.2.0…"]?.command == .event("update"))
         check("menu: no update item without an update", items(M(status: ready, viewer: nil, problem: nil)).keys.allSatisfy { !$0.hasPrefix("Update to") })
+        s["restart"] = ["version": "0.2.0"]
+        i = items(M(status: s, viewer: nil, problem: nil))
+        check("menu: a newer copy on disk offers Restart to Finish Updating instead of Update",
+              i["Restart to Finish Updating to 0.2.0"]?.command == .event("restart") && i.keys.allSatisfy { !$0.hasPrefix("Update to") })
+        check("menu: no restart item without one waiting", items(M(status: ready, viewer: nil, problem: nil)).keys.allSatisfy { !$0.hasPrefix("Restart") })
 
         s = ready
         s["setupUrl"] = "file:///etc/hosts"

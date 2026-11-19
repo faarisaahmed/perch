@@ -54,9 +54,14 @@ security never depends on it — see Binding.)
 
 Messages (all carry `sid`, a random 16-byte base64url session id chosen by the viewer):
 
-1. viewer → topic: `{t:"hello", sid, pv, route, label, pairId?}` — `pv` = viewer's `PROTO`; `route` is
+1. viewer → topic: `{t:"hello", sid, pv, route, label, pairId?, opaque1?}` — `pv` = viewer's `PROTO`; `route` is
    `"passkey"`, `"backup"` or `"pair"`; `label` is a short device description such as `"Safari on iPhone"`.
-2. Mac → reply topic: `{t:"offer", sid, pv, minPv, hv, sdp, iceServers?}` — `hv` is the app version; `sdp` the
+   `opaque1` (backup only, from 0.3.5's website on): OPAQUE's first login message, so the password is checked here
+   rather than after connecting. The Mac counts it against the backup lockout at once, as it would `opaque1` over
+   the connection, and puts its reply in the offer as `opaque2`; the viewer checks the password from that reply and,
+   if it is wrong, sends `{t:"cancel", sid, reason:"wrong-password"}` instead of an answer (the Mac logs the failure
+   and frees the session's place). A right one connects and gives only `opaque3` (bound to the connection).
+2. Mac → reply topic: `{t:"offer", sid, pv, minPv, hv, sdp, iceServers?, ws?, opaque2?}` — `hv` is the app version; `sdp` the
    complete offer (ICE gathering finished, no trickle); `iceServers` the owner's relay logins, if a relay is set up
    (see Relay). Or `{t:"refuse", sid, reason, retryAfter?, pv, minPv, hv}` where reason is
    `version | busy | paused | locked-out | backup-off | not-set-up | rate`.
@@ -297,10 +302,18 @@ owner's passkeys. Hellos are limited per topic (host topic: passkey and pairing;
 3 sessions signing in at once each, and a session whose viewer hasn't answered the offer within 15 s is dropped. TOTP codes are accepted for the previous, current and
 next 30-second step, and each step only once.
 
-`ready`: `{t:"ready", name, hv, display: {id, width, height}, displays: [{id, name, width, height, main}],
-quality, audio, input, locked}` — `input` false means Accessibility permission is missing (view only).
+`ready`: `{t:"ready", name, hv, display: {id, width, height}, displays: [{id, name, x?, y?, width, height, main}],
+quality, audio, input, locked}` — `input` false means Accessibility permission is missing (view only). Sizes and
+positions are in points; `x`, `y` (from 0.3.3) are each display's top-left corner in the Mac's arrangement, which the
+viewer's display map and edge flip use (without them it takes the displays to sit side by side in the order listed).
 
 ## Control channel: during a session
+
+viewer → Mac (owner only): `{t:"levels", speakers?, stream?}` — sound while connected: the Mac's own speakers (0–1;
+below 1 the Mac's sound is taken with a Core Audio tap that keeps it off the speakers, and Perch plays its own copy at
+that level) and what is sent (0–1.5, soft-limited). Saved as the `macSpeakers` / `streamVolume` settings; `ready` and
+`status` carry `levels: {speakers, stream, speakersAvailable}` (`speakersAvailable`: the Mac has the tap, macOS
+14.2+), and Macs that understand it list `levels` in the offer's `caps`.
 
 viewer → Mac: `{t:"quality", preset}` (`smooth | balanced | sharp | fast`; `fast` is 60 frames a second, offered by
 Macs with `fps60` in the offer's `caps`), `{t:"display", id}`, `{t:"keyframe"}`, `{t:"view", edge}` (the longest edge
@@ -374,7 +387,7 @@ stdout (host → app). stderr is the host's log. Every frame is `[u32 big-endian
 
 | Type | Direction | Payload |
 |---|---|---|
-| `0x01` HELLO | app → host | JSON `{app, version, ipc: 1, macos, synthetic, permissions: {screen, accessibility}, displays, loginItem}` |
+| `0x01` HELLO | app → host | JSON `{app, version, ipc: 1, macos, synthetic, soundTap, permissions: {screen, accessibility}, displays, loginItem}` (`soundTap`: it can keep the Mac's sound off its speakers, macOS 14.2+) |
 | `0x02` VIDEO | app → host | `u8 flags` (bit 0 keyframe) · `u64 BE pts µs` · H.264 Annex-B access unit (SPS/PPS before every keyframe) |
 | `0x03` AUDIO | app → host | `u64 BE pts µs` · one Opus packet (20 ms, 48 kHz stereo) |
 | `0x04` EVENT | app → host | JSON event (below) |
@@ -390,21 +403,24 @@ typing, from Accessibility; test runs pretend the top half of the screen is a te
 whole display), `window-fit {window, ok, error?}`,
 `capture-stopped {reason}`, `capture-error {code, message}`, `lock {locked}`, `login-item {on, status, error?}`,
 `menu {action}` (`pause | resume | disconnect | backup-on | backup-off | keep-awake-on | keep-awake-off |
-login-item-on | login-item-off | check-updates | update | quit`), `input-echo {ev}` (only with `--echo-input`),
+login-item-on | login-item-off | check-updates | update | restart | quit`), `input-echo {ev}` (only with `--echo-input`),
 `log {level, message}`.
 
-Commands (`c`): `capture {on, display?, maxEdge, fps, kbps, audio, window?}` (`window`: show only the part of the
-display that window covers, following it), `windows {}` (asks for a `windows` event), `window-fit {window, w, h}`
+Commands (`c`): `capture {on, display?, maxEdge, fps, kbps, audio, window?, profile?, maxQp?, speakers?, stream?}` (`window`: show only
+the part of the display that window covers, following it; `maxQp`: the coarsest H.264 quantiser the encoder may use,
+18–51, so on a slow link it drops frames instead of blurring; the Sharp preset sends it), `windows {}` (asks for a `windows` event), `window-fit {window, w, h}`
 (reshape it to `w:h` through Accessibility; never done in test runs), `clipboard-get {images?, auto?}` (answered with a `clipboard {ok, text, image?, mime?, auto?}` event; `image` is base64 PNG), `clipboard-set {text?, image?, paste?}` (answered with
 `clipboard-set {ok}`; test runs use a pretend clipboard), `mic {on, device?}` (start or stop playing
 MIC frames; only during a session), `keyframe {}`, `bitrate {kbps}`,
 `session {active, viewer?, route?, curtain?}` (menu light, notification, keeps the display awake while active;
 `curtain: true` blacks out the Mac's own displays with windows left out of the capture, lifted by three Esc presses
 at the Mac), `lock {}` (lock the screen; sent when a session ends and the owner chose "lock when a session ends"),
-`status {state, text, macName, setupUrl, settings, update?}` (menu bar contents), `notify {title, body}`,
+`status {state, text, macName, setupUrl, settings, update?, restart?}` (menu bar contents; `restart: {version}` when
+the Perch.app on disk is a different version from the one running, so the menu offers "Restart to Finish Updating"), `notify {title, body}`,
 `permissions {}` (asks for a `permissions` event), `request-permission {which}` (`screen | accessibility`), `reset-permission {which}` (forgets what macOS remembers
 about that permission for Perch, with `tccutil reset`, then asks again; answered with `permission-reset {which, ok}`),
-`relaunch {}` (Perch quits and opens again; neither of these two runs in test runs),
+`audio-levels {speakers?, stream?}` (sound levels mid-session, as in `capture`; the first time speakers go below 1
+the app starts its sound tap, which then runs until capture stops), `relaunch {}` (Perch quits and opens again once the old process has gone; neither of these two runs in test runs),
 `open-url {url}`, `login-item {on}`, `keep-awake {on}`, `uninstall {}`, `quit {}`.
 
 `state` is one of `starting | ready | needs-setup | offline | paused | connected | error`.
@@ -415,6 +431,16 @@ The host serves Setup on `http://127.0.0.1:<random port>/` and only answers requ
 (`?k=` on the first load, then the `X-Perch-Key` header), whose `Host` is `127.0.0.1:<port>` or `localhost:<port>`,
 and — for POSTs — whose `Origin` matches. The app's "Open Setup…" menu item opens that URL. The API is under `/api/`;
 see `host/node/src/setup-server.mjs`.
+
+**Updates.** The host asks GitHub for the latest release a minute after starting, then daily (every six hours with
+the `autoUpdate` setting on). Installing runs `site/install.sh --update`, which quits Perch (`pgrep`/`pkill -a`: the
+script runs from inside Perch, and without `-a` they skip their own ancestors), replaces the app only once it has
+exited, and opens it again. Every half minute the host also reads the version of the Perch.app on disk: a different
+one from the version running means an update that couldn't restart Perch, so Setup and the menu bar offer "Restart
+to finish updating", and once nobody has been connected, signing in, pairing or holding a guest link for two minutes
+the host restarts Perch itself, only into a copy signed like the running one (it keeps Screen Recording and
+Accessibility). With `autoUpdate` on, a new release is installed the same way, while idle. Neither is tried again
+for the same version for 30 minutes (restart) or 6 hours (update).
 
 Pairing links look like `https://just-rice.github.io/perch/connect.html#pair=<b64url(hostId ‖ sigKey ‖ pairId ‖ pairSecret ‖ pin)>`
 (the pin is missing from links made by Perch 0.1) and expire after 10 minutes.
